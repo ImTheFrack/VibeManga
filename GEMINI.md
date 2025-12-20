@@ -83,11 +83,12 @@ The project uses complex regex patterns to handle the wide variety of manga nami
 The logic *heavily* relies on the folder structure being `Category/SubCategory/Series/`. Deviations from this depth may result in data being missed or miscategorized.
 
 ## Current Commands
-*   `stats`: Scans the library and shows high-level metrics and category breakdowns.
+*   `stats`: Scans the library and shows high-level metrics, category breakdowns, and optional continuity checks (`--continuity`).
 *   `tree --depth [n]`: Visualizes the folder hierarchy.
-*   `find [name]`: Searches for a specific series.
-*   `check [name]`: Scans for missing volumes/chapters (gaps).
+*   `show [name]`: Searches for a specific series and shows detailed stats, gaps, and external updates.
 *   `dedupe [name]`: Scans for duplicate files and structural duplicates.
+*   `scrape`: Scrapes Nyaa.si for latest releases.
+*   `match`: Integrates scraped data with library metadata.
 
 ## Roadmap
 See `TODO.md` for active tasks. Next big steps involve "Deep Content Analysis" (archive inspection for page counts/corruption).

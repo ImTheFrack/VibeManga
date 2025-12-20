@@ -118,7 +118,7 @@
 
 ### v1.0 (Initial Release)
 - Core scanning functionality
-- Stats, tree, find, check, dedupe commands
+- Stats, tree, show, dedupe, scrape, match commands
 - Archive inspection and verification
 - Gap detection algorithm
 - Duplicate finder with fuzzy matching

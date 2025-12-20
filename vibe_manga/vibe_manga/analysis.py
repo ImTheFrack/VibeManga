@@ -142,6 +142,46 @@ def _check_sequence_gaps(numbers: List[float], unit_label: str) -> List[str]:
             gaps.append(f"Missing {unit_label} #{s}" if s == e else f"Missing {unit_label} #{s}-{e}")
     return gaps
 
+def format_ranges(numbers: List[float]) -> str:
+    if not numbers: return "None"
+    # Filter out negative numbers (errors/unknowns)
+    valid_nums = sorted(list(set(n for n in numbers if n >= 0)))
+    if not valid_nums: return "None"
+    
+    ranges = []
+    curr_s = curr_e = valid_nums[0]
+    
+    for i in range(1, len(valid_nums)):
+        num = valid_nums[i]
+        # Sequential check: only for integers. Floats always break a range.
+        if num == curr_e + 1 and num.is_integer() and curr_e.is_integer():
+            curr_e = num
+        else:
+            if curr_s == curr_e:
+                ranges.append(f"{int(curr_s) if curr_s.is_integer() else curr_s}")
+            else:
+                ranges.append(f"{int(curr_s) if curr_s.is_integer() else curr_s}-{int(curr_e) if curr_e.is_integer() else curr_e}")
+            curr_s = curr_e = num
+            
+    # Add final range
+    if curr_s == curr_e:
+        ranges.append(f"{int(curr_s) if curr_s.is_integer() else curr_s}")
+    else:
+        ranges.append(f"{int(curr_s) if curr_s.is_integer() else curr_s}-{int(curr_e) if curr_e.is_integer() else curr_e}")
+        
+    return ", ".join(ranges)
+
+def normalize_series_name(name: str) -> str:
+    """Normalizes a series name by moving articles to the end (e.g., 'The Ring' -> 'Ring, The')."""
+    if not name: return ""
+    name = name.strip()
+    # Patterns from matcher.py but simplified for general use
+    article_pat = r"^(The|A|An|Le|La|Les|Un|Une)\s+(.*)$"
+    match = re.match(article_pat, name, re.IGNORECASE)
+    if match:
+        return f"{match.group(2)}, {match.group(1)}"
+    return name
+
 def find_gaps(series: Series) -> List[str]:
     all_volumes = []
     all_volumes.extend(series.volumes)

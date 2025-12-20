@@ -107,12 +107,12 @@ python -m vibe_manga.run stats "One Piece"
 # Visualize library structure (depth: 1=Main, 2=Sub, 3=Series, 4=SubGroups)
 python -m vibe_manga.run tree --depth 3
 
-# Find a specific series
-python -m vibe_manga.run find "Kaiju"
+# Show details for a specific series (includes gaps and available updates)
+python -m vibe_manga.run show "Kaiju"
 
-# Check for missing volumes
-python -m vibe_manga.run check
-python -m vibe_manga.run check "One Piece" --verbose
+# Check for missing volumes/chapters across the library or a category
+python -m vibe_manga.run stats --continuity
+python -m vibe_manga.run stats "Action" --continuity
 
 # Find duplicates
 python -m vibe_manga.run dedupe
@@ -155,13 +155,13 @@ python -m vibe_manga.run match --table
 ```bash
 # Analyze page counts (slower, opens all archives)
 python -m vibe_manga.run stats --deep
-python -m vibe_manga.run find "Berserk" --deep --showfiles
+python -m vibe_manga.run show "Berserk" --deep --showfiles
 ```
 
 #### Integrity Verification
 ```bash
 # Verify archive integrity (slowest, tests all files)
-python -m vibe_manga.run check --verify
+python -m vibe_manga.run show "One Piece" --verify
 python -m vibe_manga.run stats --verify
 ```
 
@@ -178,13 +178,12 @@ rm .vibe_manga_cache.pkl vibe_manga_library.json
 
 | Command | Description | Key Options |
 |---------|-------------|-------------|
-| `stats [query]` | Show library statistics | `--deep`, `--verify`, `--no-cache` |
-| `tree` | Visualize directory hierarchy | `--depth N`, `--deep`, `--verify` |
-| `find <name>` | Search for series | `--showfiles`, `--deep`, `--verify` |
-| `check [query]` | Find missing volumes/chapters | `--verbose`, `--deep`, `--verify` |
-| `dedupe [query]` | Find duplicate files | `--verbose`, `--deep`, `--verify` |
-| `scrape` | Scrape latest entries from Nyaa | `--pages`, `--force`, `--summarize` |
-| `match [query]` | Parse & categorize scraped data | `--stats`, `--table`, `--all`, `--no-parallel` |
+| `stats [query]` | Show library statistics | `--continuity`, `--deep`, `--verify`, `--no-cache` |
+| `tree` | Visualize directory hierarchy | `--depth N`, `--deep`, `--verify`, `--no-cache` |
+| `show <name>` | Show series details, gaps, and updates | `--showfiles`, `--deep`, `--verify`, `--no-cache` |
+| `dedupe [query]` | Find duplicate files | `--verbose`, `--deep`, `--verify`, `--no-cache` |
+| `scrape` | Scrape latest entries from Nyaa | `--pages`, `--force`, `--summarize`, `--output` |
+| `match [query]` | Parse & categorize scraped data | `--stats`, `--table`, `--all`, `--no-parallel`, `--no-cache` |
 
 ## Manga Name Matching & Parsing
 
@@ -403,11 +402,11 @@ VibeManga/
 
 ```bash
 # Run on a test library
-MANGA_LIBRARY_ROOT=/path/to/test/library python -m vibe_manga stats
+MANGA_LIBRARY_ROOT=/path/to/test/library python -m vibe_manga.run stats
 
 # Enable debug logging
 # Edit main.py: logging.basicConfig(level=logging.DEBUG, ...)
-python -m vibe_manga stats
+python -m vibe_manga.run stats
 
 # Check log output
 tail -f vibe_manga.log

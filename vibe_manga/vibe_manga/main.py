@@ -24,7 +24,7 @@ import json
 
 from .scanner import scan_library, enrich_series
 from .models import Library, Category, Series
-from .analysis import find_gaps, find_duplicates, find_structural_duplicates, find_external_updates
+from .analysis import find_gaps, find_duplicates, find_structural_duplicates, find_external_updates, format_ranges, normalize_series_name
 from .cache import get_cached_library, save_library_cache, load_library_state
 from .nyaa_scraper import scrape_nyaa, get_latest_timestamp_from_nyaa
 from .matcher import process_match
@@ -243,16 +243,17 @@ def cli():
 
 @cli.command()
 @click.argument("query", required=False)
+@click.option("--continuity", is_flag=True, help="Check for missing volumes/chapters.")
 @click.option("--deep", is_flag=True, help="Perform deep analysis (page counts).")
 @click.option("--verify", is_flag=True, help="Verify archive integrity (slow).")
 @click.option("--no-cache", is_flag=True, help="Force fresh scan, ignore cache.")
-def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> None:
+def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_cache: bool) -> None:
     """
     Show statistics.
     If QUERY is provided, shows stats for the matching Category, Sub-Category, or Series.
     The highest-level match takes precedence (Main > Sub > Series).
     """
-    logger.info(f"Stats command started (query={query}, deep={deep}, verify={verify}, no_cache={no_cache})")
+    logger.info(f"Stats command started (query={query}, continuity={continuity}, deep={deep}, verify={verify}, no_cache={no_cache})")
     root_path = get_library_root()
     library = run_scan_with_progress(
         root_path,
@@ -313,7 +314,32 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
     total_volumes = 0
     total_size = 0
     total_pages = 0
+    complete_series = 0
     
+    # Helper to count complete series
+    def get_all_series(t_list, t_type):
+        all_s = []
+        for t in t_list:
+            if t_type == "Library":
+                for cat in t.categories:
+                    for sub in cat.sub_categories:
+                        all_s.extend(sub.series)
+            elif t_type == "Main Category":
+                for sub in t.sub_categories:
+                    all_s.extend(sub.series)
+            elif t_type == "Sub Category":
+                all_s.extend(t.series)
+            elif t_type == "Series":
+                all_s.append(t)
+        return all_s
+
+    if continuity:
+        with console.status("[bold blue]Checking continuity..."):
+            all_target_series = get_all_series(targets, target_type)
+            for s in all_target_series:
+                if not find_gaps(s):
+                    complete_series += 1
+
     for t in targets:
         if target_type == "Library":
             total_series += t.total_series
@@ -375,6 +401,11 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
         sub_count = sum(len(t.sub_categories) for t in targets)
         cards.append(make_stat_panel(str(sub_count), "Sub Categories", "magenta"))
     
+    if continuity and total_series > 0:
+        percent = (complete_series / total_series) * 100
+        color = "green" if percent == 100 else "yellow" if percent > 80 else "red"
+        cards.append(make_stat_panel(f"{percent:.1f}%", "Continuity", color))
+
     console.print(Columns(cards))
     console.print("")
 
@@ -388,6 +419,8 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
         t.add_column("Subs", justify="right", style="dim")
         t.add_column("Series", justify="right", style="cyan")
         t.add_column("Volumes", justify="right", style="green")
+        if continuity:
+            t.add_column("Cont.", justify="right")
         if deep:
             t.add_column("Pages", justify="right", style="blue")
         t.add_column("Size (GB)", justify="right", style="yellow")
@@ -395,6 +428,14 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
         for cat in library.categories:
             cat_gb = cat.total_size_bytes / BYTES_PER_GB
             row = [cat.name, str(len(cat.sub_categories)), str(cat.total_series_count), str(cat.total_volume_count)]
+            if continuity:
+                cat_series = []
+                for sub in cat.sub_categories: cat_series.extend(sub.series)
+                comp = sum(1 for s in cat_series if not find_gaps(s))
+                total = len(cat_series)
+                perc = (comp / total * 100) if total > 0 else 0
+                color = "green" if perc == 100 else "yellow" if perc > 80 else "red"
+                row.append(f"[{color}]{perc:.0f}%[/{color}]")
             if deep:
                 row.append(f"{cat.total_page_count:,}")
             row.append(f"{cat_gb:.2f}")
@@ -406,6 +447,8 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
         t.add_column("Parent", style="dim")
         t.add_column("Series", justify="right", style="cyan")
         t.add_column("Volumes", justify="right", style="green")
+        if continuity:
+            t.add_column("Cont.", justify="right")
         if deep:
             t.add_column("Pages", justify="right", style="blue")
         t.add_column("Size (GB)", justify="right", style="yellow")
@@ -414,6 +457,12 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
             for sub in main.sub_categories:
                 cat_gb = sub.total_size_bytes / BYTES_PER_GB
                 row = [sub.name, main.name, str(sub.total_series_count), str(sub.total_volume_count)]
+                if continuity:
+                    comp = sum(1 for s in sub.series if not find_gaps(s))
+                    total = len(sub.series)
+                    perc = (comp / total * 100) if total > 0 else 0
+                    color = "green" if perc == 100 else "yellow" if perc > 80 else "red"
+                    row.append(f"[{color}]{perc:.0f}%[/{color}]")
                 if deep:
                     row.append(f"{sub.total_page_count:,}")
                 row.append(f"{cat_gb:.2f}")
@@ -424,6 +473,8 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
         t.add_column("Series", style="white bold")
         t.add_column("Location", style="dim")
         t.add_column("Volumes", justify="right", style="green")
+        if continuity:
+            t.add_column("Cont.", justify="center")
         if deep:
             t.add_column("Pages", justify="right", style="blue")
         t.add_column("Size (MB)", justify="right", style="yellow")
@@ -433,6 +484,9 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
             for series in sub.series:
                 s_mb = series.total_size_bytes / BYTES_PER_MB
                 row = [series.name, f"{parent_name} > {sub.name}", str(series.total_volume_count)]
+                if continuity:
+                    gaps = find_gaps(series)
+                    row.append("[green]✓[/green]" if not gaps else "[red]✗[/red]")
                 if deep:
                     row.append(f"{series.total_page_count:,}")
                 row.append(f"{s_mb:.2f}")
@@ -442,6 +496,8 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
         # Show Contents (SubGroups or Volumes)
         t.add_column("Name", style="white bold")
         t.add_column("Type", style="dim")
+        if continuity:
+             t.add_column("Cont.", justify="center")
         if deep:
             t.add_column("Pages", justify="right", style="blue")
         t.add_column("Size (MB)", justify="right", style="yellow")
@@ -451,6 +507,10 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
             for sg in series.sub_groups:
                  sg_mb = sg.total_size_bytes / BYTES_PER_MB
                  row = [sg.name, "Sub-Group"]
+                 if continuity:
+                      # We don't have a direct find_gaps for SubGroup yet, but we can fake it
+                      # or just show '-'
+                      row.append("-")
                  if deep:
                      row.append(f"{sg.total_page_count:,}")
                  row.append(f"{sg_mb:.2f}")
@@ -459,6 +519,9 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
             if not series.sub_groups:
                 vol_mb = sum(v.size_bytes for v in series.volumes) / BYTES_PER_MB
                 row = [f"{len(series.volumes)} Volumes", "Files"]
+                if continuity:
+                     gaps = find_gaps(series)
+                     row.append("[green]✓[/green]" if not gaps else "[red]✗[/red]")
                 if deep:
                     row.append(f"{series.total_page_count:,}")
                 row.append(f"{vol_mb:.2f}")
@@ -468,6 +531,8 @@ def stats(query: Optional[str], deep: bool, verify: bool, no_cache: bool) -> Non
                      vol_mb = sum(v.size_bytes for v in series.volumes) / BYTES_PER_MB
                      vol_pages = sum(v.page_count for v in series.volumes if v.page_count)
                      row = [f"{len(series.volumes)} Extra Volumes", "Files"]
+                     if continuity:
+                          row.append("-")
                      if deep:
                          row.append(f"{vol_pages:,}")
                      row.append(f"{vol_mb:.2f}")
@@ -525,9 +590,9 @@ def tree(depth: int, deep: bool, verify: bool, no_cache: bool) -> None:
 @click.option("--deep", is_flag=True, help="Perform deep analysis (page counts).")
 @click.option("--verify", is_flag=True, help="Verify archive integrity (slow).")
 @click.option("--no-cache", is_flag=True, help="Force fresh scan, ignore cache.")
-def find(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: bool) -> None:
-    """Finds a specific series and shows its details."""
-    logger.info(f"Find command started (series_name={series_name}, showfiles={showfiles}, deep={deep}, verify={verify}, no_cache={no_cache})")
+def show(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: bool) -> None:
+    """Finds a specific series and shows its details, including gaps and updates."""
+    logger.info(f"Show command started (series_name={series_name}, showfiles={showfiles}, deep={deep}, verify={verify}, no_cache={no_cache})")
     root_path = get_library_root()
     library = run_scan_with_progress(
         root_path,
@@ -538,10 +603,13 @@ def find(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
     found = []
     found_series_objects = []  # For deep analysis
 
+    norm_query = normalize_series_name(series_name).lower()
+
     for main_cat in library.categories:
         for sub_cat in main_cat.sub_categories:
             for series in sub_cat.series:
-                if series_name.lower() in series.name.lower():
+                norm_series = normalize_series_name(series.name).lower()
+                if norm_query in norm_series or series_name.lower() in series.name.lower():
                     found.append((main_cat, sub_cat, series))
                     found_series_objects.append(series)
 
@@ -583,6 +651,17 @@ def find(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
             sub_groups_str = "\n".join([f"{sg.name} ({len(sg.volumes)} vols)" for sg in series.sub_groups])
             table.add_row("Sub Groups", sub_groups_str)
 
+        # Show Ranges
+        from .analysis import classify_unit
+        all_vols = series.volumes + [v for sg in series.sub_groups for v in sg.volumes]
+        v_nums, c_nums = [], []
+        for v in all_vols:
+            v_n, c_n, u_n = classify_unit(v.name)
+            v_nums.extend(v_n); c_nums.extend(c_n + u_n)
+            
+        table.add_row("Volumes", format_ranges(v_nums))
+        table.add_row("Chapters", format_ranges(c_nums))
+
         total_size_mb = series.total_size_bytes / BYTES_PER_MB
         table.add_row("Total Size", f"{total_size_mb:.2f} MB")
         
@@ -610,12 +689,12 @@ def find(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
             for up in updates[:3]: # Show top 3
                 new_str = ""
                 if up["new_volumes"]:
-                    new_str += f"Vols: {min(up['new_volumes'])}-{max(up['new_volumes'])} "
+                    new_str += f"Vols: {format_ranges(up['new_volumes'])} "
                 if up["new_chapters"]:
-                    new_str += f"Ch: {min(up['new_chapters'])}-{max(up['new_chapters'])}"
+                    new_str += f"Ch: {format_ranges(up['new_chapters'])}"
                 
                 content_elements.append(Text(f"  - {up['torrent_name']}", style="white"))
-                content_elements.append(Text(f"    New: {new_str} | Size: {up['size']} | Seeders: {up['seeders']}", style="dim"))
+                content_elements.append(Text(f"    New Content: {new_str} | Size: {up['size']} | Seeders: {up['seeders']}", style="dim"))
             
             if len(updates) > 3:
                 content_elements.append(Text(f"  ... and {len(updates)-3} more updates available.", style="dim"))
@@ -658,76 +737,6 @@ def find(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
             content_elements.append(series_tree)
             
         console.print(Padding(Group(*content_elements), (0, 0, 1, 2)))
-
-@cli.command()
-@click.argument("query", required=False)
-@click.option("--verbose", is_flag=True, help="Show series with no issues found.")
-@click.option("--deep", is_flag=True, help="Perform deep analysis (page counts).")
-@click.option("--verify", is_flag=True, help="Verify archive integrity (slow).")
-@click.option("--no-cache", is_flag=True, help="Force fresh scan, ignore cache.")
-def check(query: Optional[str], verbose: bool, deep: bool, verify: bool, no_cache: bool) -> None:
-    """
-    Checks series for missing volumes.
-    If QUERY is provided, only matching series are checked.
-    Otherwise, the whole library is scanned.
-    """
-    logger.info(f"Check command started (query={query}, verbose={verbose}, deep={deep}, verify={verify}, no_cache={no_cache})")
-    root_path = get_library_root()
-    scan_desc = f"[bold green]Checking '{query}'..." if query else "[bold green]Checking Library..."
-    library = run_scan_with_progress(root_path, scan_desc, use_cache=not no_cache)
-
-    found_any = False
-    
-    # Filter targets for deep analysis first
-    targets = []
-    if deep or verify:
-        with console.status("[bold blue]Filtering targets for analysis..."):
-            for main_cat in library.categories:
-                for sub_cat in main_cat.sub_categories:
-                    for series in sub_cat.series:
-                        if query and query.lower() not in series.name.lower():
-                            continue
-                        targets.append(series)
-        
-        if targets:
-            perform_deep_analysis(targets, deep, verify)
-            
-    with console.status("[bold blue]Analyzing results..."):
-        for main_cat in library.categories:
-            for sub_cat in main_cat.sub_categories:
-                for series in sub_cat.series:
-                    # Skip if query provided and not matching
-                    if query and query.lower() not in series.name.lower():
-                        continue
-                        
-                    found_any = True
-                    gaps = find_gaps(series)
-                    
-                    if not gaps:
-                        if verbose or query:
-                            console.print(f"[green]✓ {series.name}: Complete (No gaps found)[/green]")
-                    else:
-                        console.print(f"[red]✗ {series.name}:[/red] [dim]({main_cat.name} > {sub_cat.name})[/dim]")
-                        for gap in gaps:
-                            console.print(f"  - {gap}")
-                    
-                    # Show external updates in check command
-                    updates = find_external_updates(series)
-                    if updates:
-                        console.print(f"  [yellow]🚀 {len(updates)} update(s) available on Nyaa:[/yellow]")
-                        for up in updates[:2]: # Show top 2
-                            new_str = ""
-                            if up["new_volumes"]:
-                                new_str += f"Vols {min(up['new_volumes'])}-{max(up['new_volumes'])} "
-                            if up["new_chapters"]:
-                                new_str += f"Ch {min(up['new_chapters'])}-{max(up['new_chapters'])}"
-                            console.print(f"    - {new_str} ({up['torrent_name']})")
-
-    if query and not found_any:
-        logger.warning(f"No series found matching: {query}")
-        console.print(f"[red]No series found matching '{query}'[/red]")
-
-    logger.info("Check command completed")
 
 @cli.command()
 @click.argument("query", required=False)
