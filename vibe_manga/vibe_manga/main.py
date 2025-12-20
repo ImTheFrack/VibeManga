@@ -24,8 +24,8 @@ import json
 
 from .scanner import scan_library, enrich_series
 from .models import Library, Category, Series
-from .analysis import find_gaps, find_duplicates, find_structural_duplicates
-from .cache import get_cached_library, save_library_cache
+from .analysis import find_gaps, find_duplicates, find_structural_duplicates, find_external_updates
+from .cache import get_cached_library, save_library_cache, load_library_state
 from .nyaa_scraper import scrape_nyaa, get_latest_timestamp_from_nyaa
 from .matcher import process_match
 from .constants import (
@@ -44,7 +44,7 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('vibe_manga.log'),
@@ -100,6 +100,10 @@ def run_scan_with_progress(
             return cached_library
         logger.info("No valid cache found, performing fresh scan")
 
+    # Always try to load persistent state if it exists, to preserve external metadata
+    # even during a fresh filesystem scan.
+    existing_library = load_library_state(root_path_obj)
+
     # We will track running stats locally for the progress bar
     stats_cache = {"vols": 0, "size": 0}
     
@@ -142,7 +146,7 @@ def run_scan_with_progress(
             status_text.plain = line2_str
 
         logger.info(f"Starting library scan: {root_path}")
-        library = scan_library(root_path, progress_callback=update_progress)
+        library = scan_library(root_path, progress_callback=update_progress, existing_library=existing_library)
         logger.info(f"Scan complete: {library.total_series} series, {library.total_volumes} volumes")
 
         # Save to cache
@@ -600,6 +604,23 @@ def find(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
         
         content_elements.append(status_text)
 
+        # 1b. Check for External Updates
+        updates = find_external_updates(series)
+        if updates:
+            content_elements.append(Text("\n🚀 Available Updates (Nyaa):", style="bold yellow"))
+            for up in updates[:3]: # Show top 3
+                new_str = ""
+                if up["new_volumes"]:
+                    new_str += f"Vols: {min(up['new_volumes'])}-{max(up['new_volumes'])} "
+                if up["new_chapters"]:
+                    new_str += f"Ch: {min(up['new_chapters'])}-{max(up['new_chapters'])}"
+                
+                content_elements.append(Text(f"  - {up['torrent_name']}", style="white"))
+                content_elements.append(Text(f"    New: {new_str} | Size: {up['size']} | Seeders: {up['seeders']}", style="dim"))
+            
+            if len(updates) > 3:
+                content_elements.append(Text(f"  ... and {len(updates)-3} more updates available.", style="dim"))
+
         # 2. Show File Tree
         # Auto-show files if gaps are found so user can debug
         should_show_files = showfiles or bool(gaps)
@@ -690,6 +711,18 @@ def check(query: Optional[str], verbose: bool, deep: bool, verify: bool, no_cach
                         console.print(f"[red]✗ {series.name}:[/red] [dim]({main_cat.name} > {sub_cat.name})[/dim]")
                         for gap in gaps:
                             console.print(f"  - {gap}")
+                    
+                    # Show external updates in check command
+                    updates = find_external_updates(series)
+                    if updates:
+                        console.print(f"  [yellow]🚀 {len(updates)} update(s) available on Nyaa:[/yellow]")
+                        for up in updates[:2]: # Show top 2
+                            new_str = ""
+                            if up["new_volumes"]:
+                                new_str += f"Vols {min(up['new_volumes'])}-{max(up['new_volumes'])} "
+                            if up["new_chapters"]:
+                                new_str += f"Ch {min(up['new_chapters'])}-{max(up['new_chapters'])}"
+                            console.print(f"    - {new_str} ({up['torrent_name']})")
 
     if query and not found_any:
         logger.warning(f"No series found matching: {query}")

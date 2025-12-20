@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pathlib import Path
 
 from .constants import BYTES_PER_MB
@@ -10,6 +10,7 @@ class Volume:
     path: Path
     name: str
     size_bytes: int
+    mtime: float = 0.0
     page_count: Optional[int] = None
     is_corrupt: bool = False
 
@@ -17,6 +18,27 @@ class Volume:
     def size_mb(self) -> float:
         """Returns the size in megabytes."""
         return self.size_bytes / BYTES_PER_MB
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "name": self.name,
+            "size_bytes": self.size_bytes,
+            "mtime": self.mtime,
+            "page_count": self.page_count,
+            "is_corrupt": self.is_corrupt
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Volume':
+        return cls(
+            path=Path(data["path"]),
+            name=data["name"],
+            size_bytes=data["size_bytes"],
+            mtime=data.get("mtime", 0.0),
+            page_count=data.get("page_count"),
+            is_corrupt=data.get("is_corrupt", False)
+        )
 
 @dataclass
 class SubGroup:
@@ -37,6 +59,21 @@ class SubGroup:
     def total_page_count(self) -> int:
         return sum(v.page_count for v in self.volumes if v.page_count)
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "path": str(self.path),
+            "volumes": [v.to_dict() for v in self.volumes]
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'SubGroup':
+        return cls(
+            name=data["name"],
+            path=Path(data["path"]),
+            volumes=[Volume.from_dict(v) for v in data.get("volumes", [])]
+        )
+
 @dataclass
 class Series:
     """Represents a specific Manga title (e.g., 'Kaiju No. 8')"""
@@ -46,6 +83,8 @@ class Series:
     volumes: List[Volume] = field(default_factory=list)
     # Subdirectories that contain volumes (sub-series or groupings)
     sub_groups: List[SubGroup] = field(default_factory=list)
+    # External data (e.g. from Nyaa or other sources)
+    external_data: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def total_volume_count(self) -> int:
@@ -64,6 +103,25 @@ class Series:
     def is_complex(self) -> bool:
         """True if the series has sub-groups."""
         return len(self.sub_groups) > 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "path": str(self.path),
+            "volumes": [v.to_dict() for v in self.volumes],
+            "sub_groups": [sg.to_dict() for sg in self.sub_groups],
+            "external_data": self.external_data
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Series':
+        return cls(
+            name=data["name"],
+            path=Path(data["path"]),
+            volumes=[Volume.from_dict(v) for v in data.get("volumes", [])],
+            sub_groups=[SubGroup.from_dict(sg) for sg in data.get("sub_groups", [])],
+            external_data=data.get("external_data", {})
+        )
 
 @dataclass
 class Category:
@@ -102,6 +160,25 @@ class Category:
             count += sub.total_page_count
         return count
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "path": str(self.path),
+            "sub_categories": [sc.to_dict() for sc in self.sub_categories],
+            "series": [s.to_dict() for s in self.series]
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], parent: Optional['Category'] = None) -> 'Category':
+        cat = cls(
+            name=data["name"],
+            path=Path(data["path"]),
+            parent=parent
+        )
+        cat.sub_categories = [cls.from_dict(sc, parent=cat) for sc in data.get("sub_categories", [])]
+        cat.series = [Series.from_dict(s) for s in data.get("series", [])]
+        return cat
+
 @dataclass
 class Library:
     """The root of the manga collection"""
@@ -132,6 +209,18 @@ class Library:
     @property
     def total_pages(self) -> int:
         return sum(c.total_page_count for c in self.categories)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "path": str(self.path),
+            "categories": [c.to_dict() for c in self.categories]
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'Library':
+        lib = cls(path=Path(data["path"]))
+        lib.categories = [Category.from_dict(c) for c in data.get("categories", [])]
+        return lib
 
 def _count_subcats(cat: Category) -> int:
     count = len(cat.sub_categories)

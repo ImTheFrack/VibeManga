@@ -14,28 +14,34 @@ VibeManga is a Python-based CLI tool designed to manage, analyze, and organize a
 
 ### 1. Data Models (`models.py`)
 The project enforces a strict hierarchical data structure using Python `dataclasses`:
-*   **Library**: The root container.
-*   **Category** (Recursive): Represents both "Main" (e.g., "Action") and "Sub" (e.g., "Adventure") categories.
-*   **Series**: The actual manga title (e.g., "Kaiju No. 8").
-*   **SubGroup**: Optional sub-folders within a series (e.g., "v01-v10", "Side Stories").
-*   **Volume**: The leaf nodes, representing actual files (`.cbz`, `.cbr`, etc.).
+*   **Library**: The root container. Supports JSON serialization.
+*   **Category** (Recursive): Represents both "Main" and "Sub" categories.
+*   **Series**: The actual manga title. Includes `external_data` field for storing metadata (e.g. torrent links).
+*   **SubGroup**: Optional sub-folders within a series.
+*   **Volume**: The leaf nodes. Includes `mtime` and `size_bytes` for change detection.
+
+All models implement `to_dict()` and `from_dict()` for persistent storage in `vibe_manga_library.json`.
 
 ### 2. The Scanner (`scanner.py`)
-*   **Logic**: The scanner is custom-built to match a specific 4-level directory depth: `Root -> Main Category -> Sub Category -> Series`.
-*   **Parallelism**: Directory traversal is split. It first traverses directories to identify all `Series` paths (fast), then submits each `Series` to a `ThreadPoolExecutor` for deep file scanning.
-*   **Progress**: It supports a callback system to update the UI in real-time as series complete scanning.
+*   **Logic**: Custom 4-level depth scanner: `Root -> Main Category -> Sub Category -> Series`.
+*   **Incremental Scanning**: Reuses data from the persistent state if a file's `mtime` and `size` haven't changed.
+*   **Parallelism**: Uses `ThreadPoolExecutor` for deep file scanning.
+*   **Progress**: Real-time progress bar with detailed statistics.
 
 ### 3. Analysis Engine (`analysis.py`)
 *   **Unit Classification**: Distinguishes between Volumes (`vXX`) and Chapters (`cXX`).
-*   **Dual Extraction**: A single file can contribute to both volume and chapter counts (e.g., `v11 c48-51`).
-*   **Deduplication**: Uses semantic masking (replacing numbers with `{VOL}`) to distinguish between true duplicates and similar series names (e.g., "Season 1 v01" vs "Season 2 v01").
+*   **Dual Extraction**: Single files can contribute to both volume and chapter counts.
+*   **Deduplication**: Semantic masking and fuzzy matching for finding duplicates.
 
-### 4. CLI Entry Point (`main.py`)
-*   Uses `click` for command grouping.
-*   Uses `rich.progress` and `rich.live` for a 2-line persistent progress bar (Line 1: Visual Bar, Line 2: Detailed Stats).
+### 4. Persistence & Caching (`cache.py`)
+*   **Persistent State**: Stores the entire library hierarchy and external metadata in `vibe_manga_library.json`.
+*   **Speed Cache**: Uses `pickle` (`.vibe_manga_cache.pkl`) for high-speed access during active sessions.
+*   **Integrity**: Automatically updates the persistent state whenever changes are detected or external data is matched.
 
 ### 5. Manga Matcher & Parser (`matcher.py`)
-A robust parsing engine designed to normalize messy torrent/file names into structured Manga metadata.
+A robust parsing engine that normalizes filenames into structured metadata.
+*   **Integration**: Results from the `match` command (like torrent magnets) are integrated directly into the `Series.external_data` field in the persistent library state.
+*   **Dual-Layer Matching**: Checks for existing matches in the output file and library before performing new matches.
 
 #### Classification Logic
 The matcher assigns a `Type` to each entry:

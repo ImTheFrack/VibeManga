@@ -1,22 +1,28 @@
 """
-Caching functionality for VibeManga library scans.
+Caching and persistence functionality for VibeManga library scans.
 """
 
 import logging
 import pickle
+import json
 import time
 from pathlib import Path
 from typing import Optional
 
 from .models import Library
-from .constants import DEFAULT_CACHE_MAX_AGE_SECONDS, CACHE_FILENAME
+from .constants import DEFAULT_CACHE_MAX_AGE_SECONDS, CACHE_FILENAME, LIBRARY_STATE_FILENAME
 
 logger = logging.getLogger(__name__)
 
 
 def get_cache_path(library_root: Path) -> Path:
-    """Returns the cache file path for a given library root."""
-    return library_root / CACHE_FILENAME
+    """Returns the cache file path (stored in current working directory)."""
+    return Path.cwd() / CACHE_FILENAME
+
+
+def get_state_path(library_root: Path) -> Path:
+    """Returns the persistent state JSON path (stored in current working directory)."""
+    return Path.cwd() / LIBRARY_STATE_FILENAME
 
 
 def get_cached_library(
@@ -25,13 +31,6 @@ def get_cached_library(
 ) -> Optional[Library]:
     """
     Retrieves a cached library scan if available and fresh.
-
-    Args:
-        root: The library root path.
-        max_age_seconds: Maximum age of cache in seconds (default: 300 = 5 minutes).
-
-    Returns:
-        Cached Library object if valid, None otherwise.
     """
     cache_file = get_cache_path(root)
 
@@ -64,12 +63,6 @@ def get_cached_library(
 def save_library_cache(library: Library) -> bool:
     """
     Saves a library scan to the cache.
-
-    Args:
-        library: The Library object to cache.
-
-    Returns:
-        True if successful, False otherwise.
     """
     cache_file = get_cache_path(library.path)
 
@@ -78,6 +71,10 @@ def save_library_cache(library: Library) -> bool:
         with open(cache_file, 'wb') as f:
             pickle.dump(library, f)
         logger.debug(f"Cache saved successfully: {library.total_series} series")
+        
+        # Also save to persistent JSON state
+        save_library_state(library)
+        
         return True
 
     except (pickle.PickleError, OSError) as e:
@@ -88,26 +85,78 @@ def save_library_cache(library: Library) -> bool:
         return False
 
 
-def clear_cache(library_root: Path) -> bool:
+def load_library_state(root: Path) -> Optional[Library]:
     """
-    Clears the cache for a given library.
-
-    Args:
-        library_root: The library root path.
-
-    Returns:
-        True if cache was cleared, False if no cache existed or error occurred.
+    Loads the persistent library state from JSON.
     """
-    cache_file = get_cache_path(library_root)
+    state_file = get_state_path(root)
 
-    if not cache_file.exists():
-        logger.debug("No cache file to clear")
-        return False
+    if not state_file.exists():
+        logger.debug(f"No persistent state found at {state_file}")
+        return None
 
     try:
-        cache_file.unlink()
-        logger.info(f"Cache cleared: {cache_file}")
+        logger.info(f"Loading persistent library state from {state_file}")
+        with open(state_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        library = Library.from_dict(data)
+        logger.debug(f"Successfully loaded persistent state: {library.total_series} series")
+        return library
+
+    except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+        logger.warning(f"Failed to load persistent state: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error loading state: {e}")
+        return None
+
+
+def save_library_state(library: Library) -> bool:
+    """
+    Saves the library scan to a persistent JSON state.
+    """
+    state_file = get_state_path(library.path)
+
+    try:
+        logger.info(f"Saving persistent library state to {state_file}")
+        data = library.to_dict()
+        with open(state_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        logger.debug(f"Persistent state saved successfully")
         return True
-    except OSError as e:
-        logger.error(f"Failed to clear cache: {e}")
+
+    except (TypeError, OSError) as e:
+        logger.error(f"Failed to save persistent state: {e}")
         return False
+    except Exception as e:
+        logger.error(f"Unexpected error saving state: {e}")
+        return False
+
+
+def clear_cache(library_root: Path) -> bool:
+    """
+    Clears both cache and persistent state for a given library.
+    """
+    cache_file = get_cache_path(library_root)
+    state_file = get_state_path(library_root)
+
+    cleared = False
+    
+    if cache_file.exists():
+        try:
+            cache_file.unlink()
+            logger.info(f"Cache cleared: {cache_file}")
+            cleared = True
+        except OSError as e:
+            logger.error(f"Failed to clear cache: {e}")
+
+    if state_file.exists():
+        try:
+            state_file.unlink()
+            logger.info(f"Persistent state cleared: {state_file}")
+            cleared = True
+        except OSError as e:
+            logger.error(f"Failed to clear state: {e}")
+
+    return cleared

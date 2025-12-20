@@ -17,7 +17,7 @@ from rich.align import Align
 from . import constants as c
 from .scanner import scan_library
 from .models import Series, Library
-from .cache import get_cached_library
+from .cache import get_cached_library, save_library_cache
 
 console = Console()
 
@@ -670,6 +670,9 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
     total_library_series = 0
     matched_library_paths: Set[str] = set()
     
+    # Map to track Series by path for quick updates
+    series_by_path: Dict[str, Series] = {}
+
     if library:
         try:
              # Flatten library
@@ -678,6 +681,7 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
                  for sub in cat.sub_categories:
                      for s in sub.series:
                          all_series.append(s)
+                         series_by_path[str(s.path)] = s
              
              # Filter if query provided
              if query:
@@ -757,8 +761,10 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
                 status_text.plain = f"Skipping {parsed.get('type')}: {pnames}"
             
             # Match against library
+            matched_series = None
             if is_manga and library_series:
-                 if parsed.get("matched_name"):
+                 if parsed.get("matched_name") and parsed.get("matched_path") in series_by_path:
+                     matched_series = series_by_path[parsed["matched_path"]]
                      status_text.plain = f"Existing Match: {pnames} -> [dim green]{parsed['matched_name']}[/dim green]"
                      matched_library_paths.add(parsed["matched_path"])
                  else:
@@ -783,6 +789,30 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
                              status_text.plain = f"Matching: {pnames} -> [bold green]MATCHED: {matched_series.name}[/bold green]"
                              break
             
+            # INTEGRATION: Update Series external_data
+            if matched_series:
+                 if "nyaa_matches" not in matched_series.external_data:
+                     matched_series.external_data["nyaa_matches"] = []
+                 
+                 # Check if this magnet is already in external_data
+                 existing_magnets = {m.get("magnet_link") for m in matched_series.external_data["nyaa_matches"]}
+                 if magnet and magnet not in existing_magnets:
+                     match_entry = {
+                         "name": parsed.get("name"),
+                         "magnet_link": magnet,
+                         "size": parsed.get("size"),
+                         "date": parsed.get("date"),
+                         "seeders": parsed.get("seeders"),
+                         "leechers": parsed.get("leechers"),
+                         "completed": parsed.get("completed"),
+                         "type": parsed.get("type"),
+                         "volume_begin": parsed.get("volume_begin"),
+                         "volume_end": parsed.get("volume_end"),
+                         "chapter_begin": parsed.get("chapter_begin"),
+                         "chapter_end": parsed.get("chapter_end")
+                     }
+                     matched_series.external_data["nyaa_matches"].append(match_entry)
+            
             # If no new match found BUT we have an existing ID/Name, we should track it for stats
             if parsed.get("matched_path"):
                  matched_library_paths.add(parsed["matched_path"])
@@ -801,6 +831,11 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
         console.print(f"[green]Successfully processed {len(processed_data)} entries. Saved to {output_file}[/green]")
     except Exception as e:
         console.print(f"[red]Error writing to {output_file}: {e}[/red]")
+
+    # Save the updated Library state
+    if library:
+        save_library_cache(library)
+        console.print(f"[green]Integrated matches into library state.[/green]")
 
     # Prepare Data for Display
     table_data = processed_data

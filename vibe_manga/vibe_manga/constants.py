@@ -18,6 +18,7 @@ MIN_CHAP_SIZE_MB = 3
 # Cache Configuration
 DEFAULT_CACHE_MAX_AGE_SECONDS = 3000  # 3000 seconds (50 minutes)
 CACHE_FILENAME = ".vibe_manga_cache.pkl"
+LIBRARY_STATE_FILENAME = "vibe_manga_library.json"
 
 # Display Configuration
 DEFAULT_TREE_DEPTH = 2

@@ -30,7 +30,10 @@ VibeManga is designed to handle massive manga collections (thousands of series, 
   - Page counting
   - Integrity verification
   - Corruption detection
-- **💾 Smart Caching**: Automatic caching of library scans for instant subsequent runs (5-minute default TTL)
+- **💾 Smart Caching & Persistence**: 
+  - Dual-layer caching: Fast `pickle` cache for instant subsequent runs and a persistent `vibe_manga_library.json` for long-term storage.
+  - Incremental Scanning: Automatically detects filesystem changes (mtime/size) to only re-scan modified files.
+- **🔗 External Data Integration**: Integrates metadata from external sources (like Nyaa torrent links) directly into your library's persistent state.
 - **📝 Comprehensive Logging**: Detailed logging to file and console for debugging and monitoring
 
 ### 🎯 Key Capabilities
@@ -266,29 +269,31 @@ Library
 
 #### 1. Scanner (`scanner.py`)
 - Custom-built for the specific 4-level directory structure
-- Parallel execution: Identifies series paths first, then scans each in parallel
-- Real-time progress callbacks for UI updates
-- Enrichment system for deep analysis and verification
+- **Incremental Scanning**: Compares current file `mtime` and `size` against the persistent state to avoid redundant processing.
+- Parallel execution: Identifies series paths first, then scans each in parallel.
+- Real-time progress callbacks for UI updates.
+- Enrichment system for deep analysis and verification.
 
 #### 2. Analysis Engine (`analysis.py`)
-- **Regex Patterns**: Complex verbose regex for volume/chapter extraction
-- **Noise Filtering**: Strips years, versions, seasons before parsing
-- **Dual Extraction**: Single file can contribute to both volume AND chapter counts
-- **Priority Handling**: Ranges prioritized over single numbers
-- **Gap Detection**: Identifies missing sequences with range formatting
-- **Fuzzy Matching**: 95% similarity threshold for duplicate detection
+- **Regex Patterns**: Complex verbose regex for volume/chapter extraction.
+- **Noise Filtering**: Strips years, versions, seasons before parsing.
+- **Dual Extraction**: Single file can contribute to both volume AND chapter counts.
+- **Priority Handling**: Ranges prioritized over single numbers.
+- **Gap Detection**: Identifies missing sequences with range formatting.
+- **Fuzzy Matching**: 95% similarity threshold for duplicate detection.
 
 #### 3. CLI (`main.py`)
-- `click`-based command structure with nested groups
-- Rich progress bars with 2-line display (visual bar + detailed stats)
-- Smart caching with automatic invalidation
-- Comprehensive error handling and logging
+- `click`-based command structure with nested groups.
+- Rich progress bars with 2-line display (visual bar + detailed stats).
+- Integrated matching: The `match` command now integrates results directly into the library state.
+- Comprehensive error handling and logging.
 
-#### 4. Cache System (`cache.py`)
-- Pickle-based serialization of Library objects
-- Configurable TTL (default: 5 minutes)
-- Automatic save after fresh scans
-- Path-based cache file location
+#### 4. Cache & Persistence (`cache.py`)
+- **Dual-Layer Persistence**: 
+  - Fast `pickle` cache for short-term session speed.
+  - Persistent JSON state (`vibe_manga_library.json`) for long-term storage of library data and external metadata.
+- Configurable TTL for the speed cache (default: 50 minutes).
+- Automatic state preservation after every matching operation.
 
 #### 5. Constants (`constants.py`)
 - Centralized configuration and magic numbers
