@@ -1,0 +1,206 @@
+# VibeManga .gitignore
+
+# ============================================
+# SECRETS & SENSITIVE DATA
+# ============================================
+.env
+.env.local
+.env.*.local
+
+# Allow .env.example (template file - no secrets)
+!.env.example
+!**/.env.example
+
+# Other sensitive config
+config.local.yml
+secrets.json
+credentials.json
+
+# ============================================
+# APPLICATION CACHE & LOGS
+# ============================================
+# VibeManga cache files (contain library scan data)
+.vibe_manga_cache.pkl
+*.pkl
+*.json
+
+# Log files
+vibe_manga.log
+*.log
+logs/
+
+# ============================================
+# PYTHON
+# ============================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# Poetry
+poetry.lock
+
+# MyPy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# ============================================
+# IDEs & EDITORS
+# ============================================
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+
+# Atom
+.atom/
+
+# ============================================
+# OPERATING SYSTEMS
+# ============================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+.Trash-*
+
+# ============================================
+# PROJECT SPECIFIC
+# ============================================
+# Test manga library (if you have one for testing)
+test_library/
+sample_library/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Database files (if you add SQLite later)
+*.db
+*.sqlite
+*.sqlite3
+
+# Archive files (you might extract for testing)
+extracted/
+temp_extract/
+
+# Documentation builds
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# ============================================
+# OPTIONAL: UNCOMMENT IF NEEDED
+# ============================================
+# macOS Python installers
+# *.dmg
+
+# Windows installers
+# *.exe
+# *.msi
+
+# Compressed archives (be careful with this - you might want to keep some)
+# *.zip
+# *.tar.gz
+# *.rar

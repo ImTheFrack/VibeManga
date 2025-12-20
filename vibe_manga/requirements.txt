@@ -1,0 +1,7 @@
+click
+python-dotenv
+rich
+rarfile
+requests
+beautifulsoup4
+lxml

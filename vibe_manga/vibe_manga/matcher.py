@@ -1,0 +1,945 @@
+import re
+import json
+import html
+import os
+import time
+import difflib
+from typing import List, Dict, Any, Tuple, Optional, Set
+from pathlib import Path
+from rich.console import Console, Group
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
+from rich.live import Live
+from rich.text import Text
+from rich.panel import Panel
+from rich.columns import Columns
+from rich.align import Align
+from . import constants as c
+from .scanner import scan_library
+from .models import Series, Library
+from .cache import get_cached_library
+
+console = Console()
+
+# --- CONSTANTS & PATTERNS ---
+MIN_VOL_SIZE = c.MIN_VOL_SIZE_MB * c.BYTES_PER_MB
+MIN_CHAP_SIZE = c.MIN_CHAP_SIZE_MB * c.BYTES_PER_MB
+
+# Skip Patterns (Regex)
+SKIP_INDICATORS = {
+    "Light Novel": [r"\blight\s*novels?\b", r"\blns?\b", r"j-novel", r"web\s*novel", r"som\s*kanzenban\s*english"],
+    "Visual Novel": [r"\bvisual\s*novels?\b", r"\bvns?\b"],
+    "Audiobook": [r"audiobook"],
+    "Periodical": [
+        r"\bweekly\b.*weeks?\b", 
+        r"alpha\s*manga",
+        r"manga\s*up!", 
+        r"\bweekly\b.*updates",
+        r"\bweekly\b.*20\d{2}"
+    ], 
+    "Unknown": [r"\bc2c\b"],
+    "Anthology": [r"archives\s*[a-z]-[a-z]"] # e.g. Archives U-Z
+}
+
+# Tags: [...] or (...) or {...}
+TAG_PATTERN = r"(\[.*?\]|\(.*?\)|{.*?})"
+
+# Strings to strip from Name
+NAME_STRIP_PATTERNS = [
+    r"\s*-\s*The\s*Official\s*Comic\s*Anthology\s*-?",
+    r"\s*-\s*Official\s*Comic\s*Anthology\s*-?",
+    r"\s*-\s*Comic\s*Anthology",
+    r"\s*Comic\s*Anthology", 
+    r"\s*-\s*The\s*Complete\s*Manga\s*Collection",
+    r"\s*-\s*Complete\s*Edition",
+    r"\s*-\s*New\s*Edition",
+    r"\s*-\s*Special\s*Issue",
+    r"\s*-\s*Remastered",
+    r"\s*-manuscriptus",
+    r"\s*English\b",
+    # Specific Edition Stripping (Parens/Brackets/Braces with "Edition")
+    r"[\\\[\(\{].*?Edition[\\\]\}\\]",
+    # Generic Trailing Edition (e.g. "- Brilliant Full Color Edition")
+    r"\s*-\s*.*?Edition\s*$"
+]
+
+# "X as vY + Z" or "X as vY"
+AS_PATTERN = r"([\d\.x]+(?:[-\.][\d\.x]+)?)\s+as\s+v?(\d+(?:[-\.]\d+)?)(?:\s*\+\s*(\d+(?:[-\.]\d+)?))?"
+
+# Messy Volume Pattern
+MESSY_VOL_PATTERN = r"\b(?:v|vol)[0-9][0-9v._-]*\b"
+
+# Explicit Volume
+# Added 'parts' (plural) for JoJo support
+# Allow whitespace around separator (e.g. "Volumes 1 - 14")
+VOL_PATTERN = r"\b(?:v|vol(?:ume)?|parts)\.?\s*(\d+(?:\s*[-\.]\s*\d+)?)\b"
+
+# Explicit Chapter
+PREFIXED_CHAPTER_PATTERN = r"\b(?:ch|c|chapter)\.?\s*(\d+(?:[-\.]\d+)?)(?:\s*(?:-|to)\s*(?:ch|c|chapter)\.?\s*(\d+(?:[-\.]\d+)?))?"
+
+# Naked Chapter
+NAKED_CHAPTER_PATTERN = r"\b#?(\d+(?:\.\d+)?)(?:-(\d+(?:\.\d+)?))?\s*$"
+
+# Heuristic for detecting "English Name Native Name"
+DUAL_LANG_PATTERN = r"^([ -~]{3,})\s+([^\x00-\x7F]+.*)$"
+
+# Articles to move to end of title
+ARTICLE_PATTERN = r"^(The|A|An|Le|La|Les|Un|Une)\s+(.*)$"
+L_APOSTROPHE_PATTERN = r"^(L')(.+)$"
+
+def _parse_size(size_str: str) -> int:
+    if not size_str:
+        return 0
+    match = re.match(r"([\d.]+)\s*([KMGT]i?B)", size_str.strip(), re.IGNORECASE)
+    if not match:
+        return 0
+    val = float(match.group(1))
+    unit = match.group(2).upper()
+    multiplier = 1
+    if unit.startswith("K"): multiplier = 1024
+    elif unit.startswith("M"): multiplier = 1024**2
+    elif unit.startswith("G"): multiplier = 1024**3
+    elif unit.startswith("T"): multiplier = 1024**4
+    return int(val * multiplier)
+
+def _get_count(start: Optional[str], end: Optional[str]) -> int:
+    if not start:
+        return 0
+    try:
+        s = float(start)
+        e = float(end) if end else s
+        count = int(e) - int(s) + 1
+        return count if count > 0 else 0
+    except ValueError:
+        return 0
+
+def _parse_range(start: str, end: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+    if not start:
+        return None, None
+    s = start.replace("#", "")
+    if end:
+        e = end.replace("#", "")
+        return s, e
+    if "-" in s:
+        parts = re.split(r"\s*-\s*", s)
+        if len(parts) >= 2:
+            return parts[0], parts[1]
+    return s, s
+
+def _normalize_name(name: str) -> str:
+    """Normalize name for comparison: lower case, strip non-alphanumeric."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+def _find_best_match(name: str, library_series: List[Series]) -> Optional[Series]:
+    """
+    Finds the best matching series in the library.
+    Returns Series object or None.
+    """
+    if not name or name.startswith("SKIPPED") or name == "UNKNOWN_NAME":
+        return None
+        
+    norm_name = _normalize_name(name)
+    if not norm_name:
+        return None
+
+    # 1. Exact Match (Normalized)
+    # We iterate all series.
+    # Note: If performance becomes an issue, we should pass a precomputed map.
+    for series in library_series:
+        if _normalize_name(series.name) == norm_name:
+            return series
+            
+    # 2. Fuzzy Match
+    best_ratio = 0.0
+    best_series = None
+    
+    for series in library_series:
+        s_norm = _normalize_name(series.name)
+        if not s_norm: continue
+        
+        ratio = difflib.SequenceMatcher(None, norm_name, s_norm).ratio() * 100
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_series = series
+            
+    if best_ratio >= c.FUZZY_MATCH_THRESHOLD and best_series:
+        return best_series
+        
+    return None
+
+def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    raw_title = entry.get("name", "")
+    title = html.unescape(raw_title)
+    size_str = entry.get("size", "0 B")
+    
+    parsed_names = []
+    item_type = "Manga"
+    vol_start = None
+    vol_end = None
+    chap_start = None
+    chap_end = None
+    notes = []
+    
+    # 1. Check Skips
+    title_lower = title.lower()
+    for type_key, patterns in SKIP_INDICATORS.items():
+        for pat in patterns:
+            if re.search(pat, title_lower):
+                item_type = type_key
+                if type_key in ["Light Novel", "Periodical", "Unknown", "Audiobook", "Visual Novel", "Anthology"]:
+                    parsed_names = [f"SKIPPED: {title}"]
+                    entry.update({
+                        "parsed_name": parsed_names,
+                        "type": item_type,
+                        "volume_begin": None, "volume_end": None,
+                        "chapter_begin": None, "chapter_end": None, "notes": notes
+                    })
+                    return entry
+
+    # 1.5 Pre-Cleanup: Handle specific edge cases like (Void) | Completed
+    clean_title = title
+    if "(Void)" in title:
+        clean_title = re.sub(r"\(Void\).*?\|.*$", "", clean_title, flags=re.IGNORECASE)
+
+    # 2. Extract Tags
+    found_tags = re.findall(TAG_PATTERN, title)
+    # clean_title already init above, but we update it here
+    tag_content_list = []
+
+    for tag in found_tags:
+        content = tag[1:-1].strip()
+        # Rescue Chapters/Volumes in parens (e.g. (Chapters 210-220))
+        # Unwrap them so they can be parsed by main logic
+        if re.match(r"^(?:ch|c|chapter|vol|v|parts)\.?\s*\d", content, re.IGNORECASE):
+            clean_title = clean_title.replace(tag, f" {content} ")
+            continue
+
+        tag_lower = tag.lower()
+        if "j-novel" in tag_lower:
+            item_type = "Light Novel"
+            parsed_names = [f"SKIPPED: {title}"]
+            entry.update({
+                "parsed_name": parsed_names,
+                "type": item_type,
+                "volume_begin": None, "volume_end": None,
+                "chapter_begin": None, "chapter_end": None, "notes": notes
+            })
+            return entry
+        tag_content_list.append(content)
+        notes.append(tag)
+        clean_title = clean_title.replace(tag, " ")
+
+    # 3. Strip Name Patterns
+    for pat in sorted(NAME_STRIP_PATTERNS, key=len, reverse=True):
+        clean_title = re.sub(pat, " ", clean_title, flags=re.IGNORECASE)
+
+    # 3b. Mask Protections
+    part_mask_map = {}
+    part_matches = list(re.finditer(r"\bPart\s+(\d+)", clean_title, re.IGNORECASE))
+    for i, pm in enumerate(part_matches):
+        placeholder = f"__PART_{i}__"
+        part_mask_map[placeholder] = pm.group(0)
+        clean_title = clean_title.replace(pm.group(0), placeholder)
+
+    kaiju_match = re.search(r"\bNo[\.\s]*8\b", clean_title, re.IGNORECASE)
+    kaiju_placeholder = None
+    if kaiju_match:
+        kaiju_placeholder = "__KAIJU_8__"
+        clean_title = clean_title.replace(kaiju_match.group(0), kaiju_placeholder)
+
+    clean_title = re.sub(r"\+Epilogue", "", clean_title, flags=re.IGNORECASE)
+
+    # EDGE CASE: Vinland Saga - Chapters 210-220 V2
+    # If we have "Chapter <range> V<num>", strip the V<num> as it is likely a version
+    # matching strictly "V" or "v" followed by digits at word boundary
+    clean_title = re.sub(r"(?i)(\bChapters?\s+[\d\-\.]+\s+)(v\d+)\b", r"\1", clean_title)
+
+    # 4. Parsing Logic
+    
+    # Case A: "as vXX + YY"
+    as_match = re.search(AS_PATTERN, clean_title, re.IGNORECASE)
+    if as_match:
+        v_s, v_e = _parse_range(as_match.group(2))
+        vol_start, vol_end = v_s, v_e
+        if as_match.group(3):
+            c_s, c_e = _parse_range(as_match.group(3))
+            chap_start, chap_end = c_s, c_e
+        clean_title = clean_title.replace(as_match.group(0), " ")
+        
+    else:
+        # Case B: Standard
+        
+        # 3a. Messy Volume
+        found_complex = False
+        messy_match = re.search(MESSY_VOL_PATTERN, clean_title, re.IGNORECASE)
+        if messy_match:
+            token = messy_match.group(0)
+            is_complex = "_" in token or token.lower().count("v") > 1
+            if is_complex:
+                found_complex = True
+                parts = re.split(r"[vV_.-]", token)
+                nums = []
+                for p in parts:
+                    if p.isdigit():
+                        nums.append(int(p))
+                if len(nums) >= 2 and nums[-2] < nums[-1]:
+                    vol_start = str(nums[-2])
+                    vol_end = str(nums[-1])
+                    notes.append(f"Messy Volume: {token}")
+                    clean_title = clean_title.replace(token, " ")
+
+        # 3b. Standard Volume
+        if not found_complex:
+            vol_matches = list(re.finditer(VOL_PATTERN, clean_title, re.IGNORECASE))
+            if vol_matches:
+                min_v = float('inf')
+                max_v = float('-inf')
+                start_str = None
+                end_str = None
+                
+                for vm in vol_matches:
+                    v_s, v_e = _parse_range(vm.group(1))
+                    
+                    if v_s:
+                        try:
+                            # Parse numeric value for comparison
+                            # Note: This might strip leading zeros or fail on non-standard formats
+                            # but regex guarantees mostly digits.
+                            # We treat v_s as the authoritative start for this match.
+                            val_s = float(v_s)
+                            if val_s < min_v:
+                                min_v = val_s
+                                start_str = v_s
+                            
+                            val_e = float(v_e) if v_e else val_s
+                            if val_e > max_v:
+                                max_v = val_e
+                                end_str = v_e
+                        except ValueError:
+                            # Fallback if float conversion fails (rare)
+                            pass
+                    
+                    clean_title = clean_title.replace(vm.group(0), " ")
+                
+                if start_str:
+                    vol_start = start_str
+                    vol_end = end_str
+
+        # 3c. Prefixed Chapters
+        chap_match = re.search(PREFIXED_CHAPTER_PATTERN, clean_title, re.IGNORECASE)
+        if chap_match:
+            if chap_match.group(2):
+                c_s = chap_match.group(1)
+                c_e = chap_match.group(2)
+                chap_start, chap_end = c_s, c_e
+            else:
+                c_s, c_e = _parse_range(chap_match.group(1))
+                chap_start, chap_end = c_s, c_e
+            clean_title = clean_title.replace(chap_match.group(0), " ")
+        else:
+            # 3d. Naked Chapters (Recursive Logic)
+            first_naked = True
+            while True:
+                clean_title = clean_title.strip()
+                clean_title = re.sub(r"[\+\,\&]+$", "", clean_title).strip()
+                
+                naked_match = re.search(NAKED_CHAPTER_PATTERN, clean_title)
+                if not naked_match:
+                    break
+                
+                start_raw = naked_match.group(1)
+                end_raw = naked_match.group(2)
+                
+                is_valid = True
+                try:
+                    if float(start_raw) > 1900: is_valid = False
+                except ValueError: pass
+                if is_valid and end_raw:
+                    try:
+                        if float(start_raw) > float(end_raw): is_valid = False
+                    except ValueError: pass
+                
+                if not is_valid:
+                    break 
+                
+                if first_naked:
+                    chap_start = start_raw
+                    chap_end = end_raw if end_raw else start_raw
+                    first_naked = False
+                else:
+                    extra = start_raw
+                    if end_raw: extra += f"-{end_raw}"
+                    notes.append(f"Extra Chapter: {extra}")
+                
+                clean_title = re.sub(NAKED_CHAPTER_PATTERN, "", clean_title)
+
+    # 5. Restore Masks
+    if kaiju_placeholder:
+        clean_title = clean_title.replace(kaiju_placeholder, "No. 8")
+    for ph, orig in part_mask_map.items():
+        clean_title = clean_title.replace(ph, orig)
+
+    # 6. Cleanup Name
+    clean_title = clean_title.strip()
+    clean_title = re.sub(r"[\+\,\&\-]+$", "", clean_title).strip()
+    
+    # 6b. Replace '&' with 'to'
+    # Case 1: "Yotsuba&!" -> "Yotsubato!" (Preceded by word char)
+    clean_title = re.sub(r"(?<=\w)&", "to", clean_title, flags=re.IGNORECASE)
+    # Case 2: "Yankee & Carameliser" -> "Yankee to Carameliser" (Surrounded by spaces)
+    clean_title = re.sub(r"\s+&\s+", " to ", clean_title, flags=re.IGNORECASE)
+    
+    clean_title = re.sub(r"\s+", " ", clean_title)
+    
+    # 7. Handle Multiple Names
+    if "|" in clean_title:
+        parts = [p.strip() for p in clean_title.split("|")]
+        parsed_names = [p for p in parts if p]
+    else:
+        dual_match = re.match(DUAL_LANG_PATTERN, clean_title)
+        if dual_match:
+            parsed_names = [dual_match.group(1), dual_match.group(2)]
+        elif clean_title and clean_title != "SKIPPED":
+            parsed_names = [clean_title]
+        else:
+            if tag_content_list:
+                parsed_names = [tag_content_list[0]]
+            else:
+                parsed_names = ["UNKNOWN_NAME"]
+    
+    # 7b. Move Articles to End (e.g. "The Name" -> "Name, The")
+    # Applied to each parsed name individually
+    final_names = []
+    for name in parsed_names:
+        if name.startswith("SKIPPED:"):
+            final_names.append(name)
+            continue
+            
+        # Check standard articles
+        art_match = re.match(ARTICLE_PATTERN, name, re.IGNORECASE)
+        if art_match:
+            # Group 1: Article, Group 2: Rest
+            # Preserve original casing from the match
+            name = f"{art_match.group(2)}, {art_match.group(1)}"
+        else:
+            # Check L'
+            l_match = re.match(L_APOSTROPHE_PATTERN, name, re.IGNORECASE)
+            if l_match:
+                name = f"{l_match.group(2)}, {l_match.group(1)}"
+        
+        final_names.append(name)
+    parsed_names = final_names
+
+    # Filter out generic status words that might have leaked through
+    parsed_names = [
+        n for n in parsed_names 
+        if n.lower() not in ["completed", "ongoing", "finished"]
+    ]
+    
+    # --- RULE: Size Check for Manga ---
+    if item_type == "Manga":
+        size_bytes = _parse_size(size_str)
+        vol_count = _get_count(vol_start, vol_end)
+        chap_count = _get_count(chap_start, chap_end)
+        
+        expected_min = 0
+        if vol_count > 0:
+            expected_min = vol_count * MIN_VOL_SIZE
+        elif chap_count > 0:
+            expected_min = chap_count * MIN_CHAP_SIZE
+        else:
+            expected_min = MIN_VOL_SIZE
+        
+        if expected_min > 0 and size_bytes > 0:
+            if size_bytes < expected_min:
+                item_type = "UNDERSIZED"
+                parsed_names = [f"SKIPPED: {size_str}: {title}"]
+
+    entry.update({
+        "parsed_name": parsed_names,
+        "type": item_type,
+        "volume_begin": vol_start,
+        "volume_end": vol_end,
+        "chapter_begin": chap_start,
+        "chapter_end": chap_end,
+        "notes": notes
+    })
+    return entry
+
+def consolidate_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Union-Find initialization
+    parent = list(range(len(entries)))
+    def find(i):
+        if parent[i] != i:
+            parent[i] = find(parent[i])
+        return parent[i]
+    def union(i, j):
+        root_i = find(i)
+        root_j = find(j)
+        if root_i != root_j:
+            parent[root_i] = root_j
+
+    name_map = {}
+    
+    # 1. Build relationships (Case Insensitive)
+    for i, entry in enumerate(entries):
+        names = entry.get("parsed_name", [])
+        if not names: continue
+        for name in names:
+            name_lower = name.lower()
+            if name_lower in name_map:
+                union(i, name_map[name_lower])
+            else:
+                name_map[name_lower] = i
+
+    # 2. Group by root
+    groups = {}
+    for i, entry in enumerate(entries):
+        root = find(i)
+        if root not in groups:
+            groups[root] = {
+                "parsed_names": set(),
+                "type": entry.get("type"),
+                "vol_ranges": [],
+                "chap_ranges": [],
+                "count": 0,
+                "matched_names": set(), # Store all unique matches
+                "matched_ids": set()
+            }
+        
+        group = groups[root]
+        for n in entry.get("parsed_name", []):
+            group["parsed_names"].add(n)
+            
+        if group["type"] != "Manga" and entry.get("type") == "Manga":
+            group["type"] = "Manga"
+            
+        if entry.get("volume_begin"):
+            v_s = entry["volume_begin"]
+            v_e = entry.get("volume_end", v_s)
+            group["vol_ranges"].append((v_s, v_e))
+            
+        if entry.get("chapter_begin"):
+            c_s = entry["chapter_begin"]
+            c_e = entry.get("chapter_end", c_s)
+            group["chap_ranges"].append((c_s, c_e))
+            
+        group["count"] += 1
+
+        # Collect matches
+        if entry.get("matched_name"):
+             group["matched_names"].add(entry.get("matched_name"))
+        if entry.get("matched_id"):
+             group["matched_ids"].add(entry.get("matched_id"))
+
+    # 3. Format output
+    result = []
+    for data in groups.values():
+        sorted_names = sorted(list(data["parsed_names"]))
+        
+        # Determine consolidated match status
+        final_match_name = None
+        matches = list(data["matched_names"])
+        if len(matches) == 1:
+            final_match_name = matches[0]
+        elif len(matches) > 1:
+            final_match_name = f"MULTIPLE MATCHES: {', '.join(matches)}"
+            
+        final_match_id = None
+        ids = list(data["matched_ids"])
+        if len(ids) == 1:
+            final_match_id = ids[0]
+        elif len(ids) > 1:
+            final_match_id = "MULTIPLE_IDS"
+        
+        def range_key(r):
+            try:
+                return float(re.findall(r"[\d.]+", str(r[0]))[0])
+            except (ValueError, IndexError):
+                return 0.0
+
+        v_sorted = sorted(data["vol_ranges"], key=range_key)
+        c_sorted = sorted(data["chap_ranges"], key=range_key)
+        
+        def fmt_ranges(ranges):
+            res = []
+            for s, e in ranges:
+                if s == e: res.append(str(s))
+                else: res.append(f"{s}-{e}")
+            return res
+
+        entry = {
+            "parsed_name": sorted_names,
+            "type": data["type"],
+            "consolidated_volumes": fmt_ranges(v_sorted),
+            "consolidated_chapters": fmt_ranges(c_sorted),
+            "file_count": data["count"],
+            "matched_name": final_match_name,
+            "matched_id": final_match_id
+        }
+        result.append(entry)
+        
+    result.sort(key=lambda x: x["parsed_name"][0] if x["parsed_name"] else "")
+    return result
+
+def _propagate_matches(entries: List[Dict[str, Any]]) -> int:
+    """
+    Groups entries by parsed name and propagates match info within groups.
+    Returns number of entries updated.
+    """
+    # Union-Find initialization
+    parent = list(range(len(entries)))
+    def find(i):
+        if parent[i] != i:
+            parent[i] = find(parent[i])
+        return parent[i]
+    def union(i, j):
+        root_i = find(i)
+        root_j = find(j)
+        if root_i != root_j:
+            parent[root_i] = root_j
+
+    name_map = {}
+    
+    # 1. Build relationships
+    for i, entry in enumerate(entries):
+        names = entry.get("parsed_name", [])
+        if not names: continue
+        for name in names:
+            name_lower = name.lower()
+            if name_lower in name_map:
+                union(i, name_map[name_lower])
+            else:
+                name_map[name_lower] = i
+
+    # 2. Gather Match Info per Group
+    group_matches = {} # root_idx -> {match_data}
+    
+    for i, entry in enumerate(entries):
+        root = find(i)
+        if entry.get("matched_id"):
+            if root not in group_matches:
+                group_matches[root] = []
+            # We store the whole match object to verify consistency
+            match_info = {
+                "id": entry.get("matched_id"),
+                "name": entry.get("matched_name"),
+                "path": entry.get("matched_path")
+            }
+            # Only add if unique to avoid duplicates in list
+            if match_info not in group_matches[root]:
+                group_matches[root].append(match_info)
+
+    # 3. Propagate
+    updated_count = 0
+    for i, entry in enumerate(entries):
+        # Skip if already matched
+        if entry.get("matched_id"):
+            continue
+            
+        root = find(i)
+        if root in group_matches:
+            matches = group_matches[root]
+            # ONLY propagate if there is exactly one consistent match ID for the group
+            # If multiple different IDs matched, it's ambiguous, so we do nothing.
+            if len(matches) == 1:
+                m = matches[0]
+                entry["matched_id"] = m["id"]
+                entry["matched_name"] = m["name"]
+                entry["matched_path"] = m["path"]
+                updated_count += 1
+                
+    return updated_count
+
+def process_match(input_file: str, output_file: str, summarize: bool, consolidate: bool, show_all: bool, library: Optional[Library] = None, summary: bool = False, no_table: bool = False, query: Optional[str] = None):
+    start_time = time.time()
+    p = Path(input_file)
+    if not p.exists():
+        console.print(f"[red]Input file {input_file} not found.[/red]")
+        return
+
+    try:
+        with open(p, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        console.print(f"[red]Error reading {input_file}: {e}[/red]")
+        return
+
+    # NEW: Scan Library for Matching
+    library_series: List[Series] = []
+    total_library_series = 0
+    matched_library_paths: Set[str] = set()
+    
+    if library:
+        try:
+             # Flatten library
+             all_series = []
+             for cat in library.categories:
+                 for sub in cat.sub_categories:
+                     for s in sub.series:
+                         all_series.append(s)
+             
+             # Filter if query provided
+             if query:
+                 q_lower = query.lower()
+                 filtered = [s for s in all_series if q_lower in s.name.lower()]
+                 if not filtered:
+                     console.print(f"[red]No series found in library matching '{query}'.[/red]")
+                     return
+                 
+                 if len(filtered) > 1:
+                     names = ", ".join([s.name for s in filtered[:5]])
+                     if len(filtered) > 5: names += "..."
+                     console.print(f"[yellow]Multiple matches for '{query}': {names}. Matching against all {len(filtered)}.[/yellow]")
+                 else:
+                     console.print(f"[green]Targeting series: {filtered[0].name}[/green]")
+                 
+                 library_series = filtered
+             else:
+                 library_series = all_series
+                 
+             total_library_series = len(library_series)
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not process library for matching: {e}[/yellow]")
+
+    # PERSISTENCE: Load existing output file to preserve matches
+    existing_map = {}
+    if Path(output_file).exists():
+        try:
+            with open(output_file, 'r', encoding='utf-8') as f:
+                old_data = json.load(f)
+                for item in old_data:
+                    # Use magnet_link as unique key
+                    if "magnet_link" in item:
+                        existing_map[item["magnet_link"]] = item
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not load existing match data from {output_file}: {e}[/yellow]")
+
+    processed_data = []
+
+    # Progress Bar Setup
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeRemainingColumn(),
+    )
+    status_text = Text("Preparing...", style="dim")
+    display_group = Group(progress, status_text)
+
+    with Live(display_group, console=console, refresh_per_second=10):
+        task_id = progress.add_task("[bold green]Matching Content...", total=len(data))
+        
+        for entry in data:
+            parsed = parse_entry(entry)
+            
+            # Restore existing match data
+            magnet = parsed.get("magnet_link") or entry.get("magnet_link")
+            if magnet and magnet in existing_map:
+                existing = existing_map[magnet]
+                if existing.get("matched_name"):
+                    parsed["matched_name"] = existing["matched_name"]
+                    parsed["matched_path"] = existing.get("matched_path")
+                    parsed["matched_id"] = existing.get("matched_id")
+            
+            is_manga = parsed.get("type") == "Manga"
+            
+            # Update status with parsed names
+            pnames = ", ".join(parsed.get('parsed_name', []))
+            if len(pnames) > 80:
+                pnames = pnames[:77] + "..."
+            
+            # Only show "Matching: ..." for Manga, otherwise just show processing
+            if is_manga:
+                status_text.plain = f"Matching: {pnames}"
+            else:
+                status_text.plain = f"Skipping {parsed.get('type')}: {pnames}"
+            
+            # Match against library
+            if is_manga and library_series:
+                 if parsed.get("matched_name"):
+                     status_text.plain = f"Existing Match: {pnames} -> [dim green]{parsed['matched_name']}[/dim green]"
+                     matched_library_paths.add(parsed["matched_path"])
+                 else:
+                     for name in parsed.get("parsed_name", []):
+                         matched_series = _find_best_match(name, library_series)
+                         if matched_series:
+                             parsed["matched_path"] = str(matched_series.path)
+                             parsed["matched_name"] = matched_series.name
+                             
+                             # Compute ID (Relative Path)
+                             if library and library.path:
+                                 try:
+                                     rel = matched_series.path.relative_to(library.path)
+                                     # Ensure forward slashes for consistency
+                                     parsed["matched_id"] = str(rel).replace("\\", "/")
+                                 except ValueError:
+                                     parsed["matched_id"] = matched_series.name
+                             else:
+                                 parsed["matched_id"] = matched_series.name
+                                 
+                             matched_library_paths.add(str(matched_series.path))
+                             status_text.plain = f"Matching: {pnames} -> [bold green]MATCHED: {matched_series.name}[/bold green]"
+                             break
+            
+            # If no new match found BUT we have an existing ID/Name, we should track it for stats
+            if parsed.get("matched_path"):
+                 matched_library_paths.add(parsed["matched_path"])
+
+            processed_data.append(parsed)
+            progress.advance(task_id)
+
+    # Propagate matches to peers in the same group
+    propagated = _propagate_matches(processed_data)
+    if propagated > 0:
+        console.print(f"[green]Propagated matches to {propagated} related entries.[/green]")
+
+    try:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(processed_data, f, indent=2)
+        console.print(f"[green]Successfully processed {len(processed_data)} entries. Saved to {output_file}[/green]")
+    except Exception as e:
+        console.print(f"[red]Error writing to {output_file}: {e}[/red]")
+
+    # Prepare Data for Display
+    table_data = processed_data
+    if consolidate:
+        table_data = consolidate_entries(processed_data)
+
+    if summarize and not no_table:
+        title = "Match Summary (Consolidated)" if consolidate else "Match Summary"
+        table = Table(title=title, show_lines=True)
+        table.add_column("#", style="dim", justify="right", width=4)
+        table.add_column("Type", style="bold white", width=12)
+        table.add_column("Parsed Name(s)", style="green")
+        
+        if consolidate:
+            table.add_column("Volumes", style="cyan", justify="left")
+            table.add_column("Chapters", style="blue", justify="left")
+            table.add_column("Files", style="yellow", justify="right")
+        else:
+            table.add_column("Vol", style="cyan", justify="center")
+            table.add_column("Ch", style="blue", justify="center")
+
+        display_index = 1
+        for entry in table_data:
+            is_skipped = entry.get("type") in ["Light Novel", "Periodical", "Unknown", "Audiobook", "Visual Novel", "UNDERSIZED", "Anthology"]
+            
+            # Filter Logic
+            if show_all:
+                pass # Show everything
+            else:
+                if is_skipped: continue # Skip ignored types
+                
+                # If query is active, ONLY show matches
+                if query and not entry.get("matched_name"):
+                    continue
+
+            style = "dim" if is_skipped else ""
+            names = entry.get("parsed_name", [])
+            name_display = "\n".join(names)
+            
+            # Show Match Info
+            if entry.get("matched_name"):
+                match_str = f"[bold green]MATCHED: {entry['matched_name']}[/bold green]"
+                name_display = f"{match_str}\n{name_display}"
+
+            if name_display.startswith("SKIPPED:") and len(name_display) > 60:
+                name_display = name_display[:57] + "..."
+
+            if consolidate:
+                vol_display = "\n".join(entry.get("consolidated_volumes", []))
+                chap_display = "\n".join(entry.get("consolidated_chapters", []))
+                if len(vol_display) > 200: vol_display = vol_display[:197] + "..."
+                if len(chap_display) > 200: chap_display = chap_display[:197] + "..."
+                
+                table.add_row(
+                    str(display_index),
+                    entry.get("type", "?"),
+                    name_display,
+                    vol_display,
+                    chap_display,
+                    str(entry.get("file_count", 1)),
+                    style=style
+                )
+            else:
+                vol_str = ""
+                if entry.get("volume_begin"):
+                    vol_str = f"{entry['volume_begin']}"
+                    if entry.get("volume_end") and entry['volume_end'] != entry['volume_begin']:
+                        vol_str += f"-{entry['volume_end']}"
+                ch_str = ""
+                if entry.get("chapter_begin"):
+                    ch_str = f"{entry['chapter_begin']}"
+                    if entry.get("chapter_end") and entry['chapter_end'] != entry['chapter_begin']:
+                        ch_str += f"-{entry['chapter_end']}"
+                        
+                table.add_row(
+                    str(display_index),
+                    entry.get("type", "?"),
+                    name_display,
+                    vol_str,
+                    ch_str,
+                    style=style
+                )
+            display_index += 1
+        console.print(table)
+
+    if summary:
+        elapsed = time.time() - start_time
+        
+        # Stats Calculation
+        total_scraped = len(processed_data)
+        manga_entries = [e for e in processed_data if e.get("type") == "Manga"]
+        total_manga_scraped = len(manga_entries)
+        
+        # Count matched *scraped* items
+        # If consolidated, we check table_data
+        # If not, we check processed_data
+        
+        matched_scraped_count = 0
+        if consolidate:
+             # In consolidated view, an entry is matched if it has a match
+             matched_scraped_count = sum(1 for e in table_data if e.get("matched_name") and e.get("type") == "Manga")
+             total_manga_for_calc = sum(1 for e in table_data if e.get("type") == "Manga")
+        else:
+             matched_scraped_count = sum(1 for e in manga_entries if e.get("matched_name"))
+             total_manga_for_calc = total_manga_scraped
+
+        match_rate = 0.0
+        if total_manga_for_calc > 0:
+            match_rate = (matched_scraped_count / total_manga_for_calc) * 100
+
+        # Library Stats
+        lib_matched_count = len(matched_library_paths)
+        lib_coverage = 0.0
+        if total_library_series > 0:
+            lib_coverage = (lib_matched_count / total_library_series) * 100
+        
+        lib_unmatched_count = total_library_series - lib_matched_count
+
+        # Display Panels
+        console.print("")
+        console.print(Panel(Align("[bold magenta]Matching Performance Summary[/bold magenta]", align="center"), style="magenta"))
+        
+        def make_stat(val, label, color="white"):
+            return Panel(
+                Align(f"[bold {color}]{val}[/bold {color}]\n[dim]{label}[/dim]", align="center"),
+                expand=True
+            )
+
+        cards = [
+            make_stat(f"{elapsed:.2f}s", "Duration", "cyan"),
+            make_stat(f"{total_scraped}", "Scraped Items", "white"),
+            make_stat(f"{total_manga_for_calc}", "Manga Groups" if consolidate else "Manga Entries", "blue"),
+        ]
+        console.print(Columns(cards))
+        
+        cards2 = [
+            make_stat(f"{match_rate:.1f}%", f"Match Rate ({matched_scraped_count}/{total_manga_for_calc})", "green"),
+            make_stat(f"{lib_coverage:.1f}%", f"Lib Coverage ({lib_matched_count}/{total_library_series})", "yellow"),
+            make_stat(f"{lib_unmatched_count}", "Unmatched Series", "red"),
+        ]
+        console.print(Columns(cards2))
+        console.print("")
