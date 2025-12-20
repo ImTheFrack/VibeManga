@@ -44,7 +44,7 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.ERROR,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('vibe_manga.log'),
@@ -149,10 +149,9 @@ def run_scan_with_progress(
         library = scan_library(root_path, progress_callback=update_progress, existing_library=existing_library)
         logger.info(f"Scan complete: {library.total_series} series, {library.total_volumes} volumes")
 
-        # Save to cache
-        if use_cache:
-            logger.info("Saving scan results to cache")
-            save_library_cache(library)
+        # Save to cache so subsequent runs are fast
+        logger.info("Saving scan results to cache")
+        save_library_cache(library)
 
         return library
 
@@ -912,18 +911,17 @@ def scrape(pages: int, output: str, user_agent: Optional[str], force: bool, summ
 @click.argument("query", required=False)
 @click.option("--input-file", default=NYAA_DEFAULT_OUTPUT_FILENAME, help="Input JSON file (default: nyaa_scrape_results.json)")
 @click.option("--output-file", default="nyaa_match_results.json", help="Output JSON file.")
-@click.option("--summarize", is_flag=True, help="Show the results table.")
-@click.option("--consolidate", is_flag=True, help="Merge entries with the same name into a single row.")
+@click.option("--table", is_flag=True, help="Show the results table.")
 @click.option("--all", "show_all", is_flag=True, help="Show all entries, including skipped ones.")
 @click.option("--no-cache", is_flag=True, help="Force fresh scan for matching logic.")
-@click.option("--summary", is_flag=True, help="Show a visually compelling summary of match statistics.")
-@click.option("--notable", "no_table", is_flag=True, help="Skip the results table output (useful with --summary).")
-def match(query: Optional[str], input_file: str, output_file: str, summarize: bool, consolidate: bool, show_all: bool, no_cache: bool, summary: bool, no_table: bool) -> None:
+@click.option("--stats", is_flag=True, help="Show a visually compelling summary of match statistics.")
+@click.option("--no-parallel", is_flag=True, help="Disable parallel matching (slower).")
+def match(query: Optional[str], input_file: str, output_file: str, table: bool, show_all: bool, no_cache: bool, stats: bool, no_parallel: bool) -> None:
     """
     Parses scraped data to extract manga info.
     If QUERY is provided, only matches against library series matching that name.
     """
-    logger.info(f"Match command started (query={query}, input={input_file}, output={output_file}, summarize={summarize}, consolidate={consolidate}, show_all={show_all}, no_cache={no_cache}, summary={summary}, no_table={no_table})")
+    logger.info(f"Match command started (query={query}, input={input_file}, output={output_file}, table={table}, show_all={show_all}, no_cache={no_cache}, stats={stats}, no_parallel={no_parallel})")
     
     # Run scan with progress for better UX
     root_path = get_library_root()
@@ -933,7 +931,7 @@ def match(query: Optional[str], input_file: str, output_file: str, summarize: bo
         use_cache=not no_cache
     )
     
-    process_match(input_file, output_file, summarize, consolidate, show_all, library=library, summary=summary, no_table=no_table, query=query)
+    process_match(input_file, output_file, table, show_all, library=library, show_stats=stats, query=query, parallel=not no_parallel)
 
 if __name__ == "__main__":
     cli()

@@ -32,6 +32,7 @@ VibeManga is designed to handle massive manga collections (thousands of series, 
   - Corruption detection
 - **💾 Smart Caching & Persistence**: 
   - Dual-layer caching: Fast `pickle` cache for instant subsequent runs and a persistent `vibe_manga_library.json` for long-term storage.
+  - **Local Storage**: All metadata and caches are stored in your running directory (project root), keeping your manga library folders clean.
   - Incremental Scanning: Automatically detects filesystem changes (mtime/size) to only re-scan modified files.
 - **🔗 External Data Integration**: Integrates metadata from external sources (like Nyaa torrent links) directly into your library's persistent state.
 - **📝 Comprehensive Logging**: Detailed logging to file and console for debugging and monitoring
@@ -136,19 +137,16 @@ python -m vibe_manga.run scrape --force
 ```
 
 #### 2. Match Against Library
-Parse the scraped data and compare it with your local library to identify relevant updates.
+Parse the scraped data and compare it with your local library to identify relevant updates. Matches are automatically consolidated by series.
 ```bash
-# Match scraped data against your library
-python -m vibe_manga.run match --summary
+# Match scraped data and show a high-level performance summary
+python -m vibe_manga.run match --stats
 
 # Filter matches for a specific series in your library
-python -m vibe_manga.run match "Dandadan" --consolidate
+python -m vibe_manga.run match "Dandadan"
 
-# Show detailed table of all potential matches
-python -m vibe_manga.run match --summarize
-
-# Show a high-level visual summary only (no table)
-python -m vibe_manga.run match --summary --notable
+# Show detailed table of all matches
+python -m vibe_manga.run match --table
 ```
 
 ### Advanced Options
@@ -169,11 +167,11 @@ python -m vibe_manga.run stats --verify
 
 #### Cache Management
 ```bash
-# Force fresh scan (ignore cache)
+# Force fresh scan and update the cache
 python -m vibe_manga.run stats --no-cache
 
-# Clear cache manually
-rm /path/to/library/.vibe_manga_cache.pkl
+# Clear cache manually (files are in project root)
+rm .vibe_manga_cache.pkl vibe_manga_library.json
 ```
 
 ### Command Reference
@@ -186,7 +184,7 @@ rm /path/to/library/.vibe_manga_cache.pkl
 | `check [query]` | Find missing volumes/chapters | `--verbose`, `--deep`, `--verify` |
 | `dedupe [query]` | Find duplicate files | `--verbose`, `--deep`, `--verify` |
 | `scrape` | Scrape latest entries from Nyaa | `--pages`, `--force`, `--summarize` |
-| `match [query]` | Parse & categorize scraped data | `--summary`, `--consolidate`, `--notable` |
+| `match [query]` | Parse & categorize scraped data | `--stats`, `--table`, `--all`, `--no-parallel` |
 
 ## Manga Name Matching & Parsing
 
@@ -292,8 +290,9 @@ Library
 - **Dual-Layer Persistence**: 
   - Fast `pickle` cache for short-term session speed.
   - Persistent JSON state (`vibe_manga_library.json`) for long-term storage of library data and external metadata.
+- **Project-Centric**: Caches are stored in the current working directory, not the manga library path.
 - Configurable TTL for the speed cache (default: 50 minutes).
-- Automatic state preservation after every matching operation.
+- Automatic state preservation after every matching and scanning operation.
 
 #### 5. Constants (`constants.py`)
 - Centralized configuration and magic numbers

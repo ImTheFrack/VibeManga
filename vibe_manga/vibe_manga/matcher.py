@@ -4,8 +4,12 @@ import html
 import os
 import time
 import difflib
+import logging
+import concurrent.futures
+import multiprocessing
 from typing import List, Dict, Any, Tuple, Optional, Set
 from pathlib import Path
+
 from rich.console import Console, Group
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
@@ -19,6 +23,7 @@ from .scanner import scan_library
 from .models import Series, Library
 from .cache import get_cached_library, save_library_cache
 
+logger = logging.getLogger(__name__)
 console = Console()
 
 # --- CONSTANTS & PATTERNS ---
@@ -130,42 +135,58 @@ def _normalize_name(name: str) -> str:
     """Normalize name for comparison: lower case, strip non-alphanumeric."""
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
-def _find_best_match(name: str, library_series: List[Series]) -> Optional[Series]:
+def match_single_entry(entry: Dict[str, Any], library_series_data: List[Tuple[str, str, str]], existing_match: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Finds the best matching series in the library.
-    Returns Series object or None.
+    Worker function to process a single entry.
+    library_series_data is a list of (name, path, normalized_name).
     """
-    if not name or name.startswith("SKIPPED") or name == "UNKNOWN_NAME":
-        return None
-        
-    norm_name = _normalize_name(name)
-    if not norm_name:
-        return None
-
-    # 1. Exact Match (Normalized)
-    # We iterate all series.
-    # Note: If performance becomes an issue, we should pass a precomputed map.
-    for series in library_series:
-        if _normalize_name(series.name) == norm_name:
-            return series
-            
-    # 2. Fuzzy Match
-    best_ratio = 0.0
-    best_series = None
+    parsed = parse_entry(entry)
     
-    for series in library_series:
-        s_norm = _normalize_name(series.name)
-        if not s_norm: continue
+    # Restore existing match data if available
+    magnet = parsed.get("magnet_link") or entry.get("magnet_link")
+    if existing_match and existing_match.get("matched_name"):
+        parsed["matched_name"] = existing_match["matched_name"]
+        parsed["matched_path"] = existing_match.get("matched_path")
+        parsed["matched_id"] = existing_match.get("matched_id")
+        return parsed
+
+    is_manga = parsed.get("type") == "Manga"
+    if not is_manga or not library_series_data:
+        return parsed
+
+    # Matching Logic
+    best_match = None
+    for name in parsed.get("parsed_name", []):
+        norm_name = _normalize_name(name)
+        if not norm_name: continue
+
+        # 1. Exact Match (Normalized)
+        for s_name, s_path, s_norm in library_series_data:
+            if s_norm == norm_name:
+                best_match = (s_name, s_path)
+                break
         
-        ratio = difflib.SequenceMatcher(None, norm_name, s_norm).ratio() * 100
-        if ratio > best_ratio:
-            best_ratio = ratio
-            best_series = series
+        if best_match: break
+
+        # 2. Fuzzy Match
+        best_ratio = 0.0
+        for s_name, s_path, s_norm in library_series_data:
+            if not s_norm: continue
             
-    if best_ratio >= c.FUZZY_MATCH_THRESHOLD and best_series:
-        return best_series
+            # SequenceMatcher can be slow, but this is now running in parallel
+            ratio = difflib.SequenceMatcher(None, norm_name, s_norm).ratio() * 100
+            if ratio > best_ratio:
+                best_ratio = ratio
+                if ratio >= c.FUZZY_MATCH_THRESHOLD:
+                    best_match = (s_name, s_path)
         
-    return None
+        if best_match: break
+
+    if best_match:
+        parsed["matched_name"] = best_match[0]
+        parsed["matched_path"] = best_match[1]
+        
+    return parsed
 
 def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     raw_title = entry.get("name", "")
@@ -384,10 +405,9 @@ def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     clean_title = re.sub(r"[\+\,\&\-]+$", "", clean_title).strip()
     
     # 6b. Replace '&' with 'to'
-    # Case 1: "Yotsuba&!" -> "Yotsubato!" (Preceded by word char)
-    clean_title = re.sub(r"(?<=\w)&", "to", clean_title, flags=re.IGNORECASE)
-    # Case 2: "Yankee & Carameliser" -> "Yankee to Carameliser" (Surrounded by spaces)
-    clean_title = re.sub(r"\s+&\s+", " to ", clean_title, flags=re.IGNORECASE)
+    # Only apply when '&' is attached to the end of a word as a suffix (e.g. "Yotsuba&!" -> "Yotsubato!")
+    # We avoid replacing standalone " & " or infix "A&B" as those are usually just separators.
+    clean_title = re.sub(r"(?<=\w)&(?!\w|\s)", "to", clean_title, flags=re.IGNORECASE)
     
     clean_title = re.sub(r"\s+", " ", clean_title)
     
@@ -651,7 +671,7 @@ def _propagate_matches(entries: List[Dict[str, Any]]) -> int:
                 
     return updated_count
 
-def process_match(input_file: str, output_file: str, summarize: bool, consolidate: bool, show_all: bool, library: Optional[Library] = None, summary: bool = False, no_table: bool = False, query: Optional[str] = None):
+def process_match(input_file: str, output_file: str, show_table: bool, show_all: bool, library: Optional[Library] = None, show_stats: bool = False, query: Optional[str] = None, parallel: bool = True):
     start_time = time.time()
     p = Path(input_file)
     if not p.exists():
@@ -706,6 +726,9 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
         except Exception as e:
             console.print(f"[yellow]Warning: Could not process library for matching: {e}[/yellow]")
 
+    # Pre-calculate normalized names and basic data for workers to minimize overhead
+    library_series_data = [(s.name, str(s.path), _normalize_name(s.name)) for s in library_series]
+
     # PERSISTENCE: Load existing output file to preserve matches
     existing_map = {}
     if Path(output_file).exists():
@@ -713,7 +736,6 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
             with open(output_file, 'r', encoding='utf-8') as f:
                 old_data = json.load(f)
                 for item in old_data:
-                    # Use magnet_link as unique key
                     if "magnet_link" in item:
                         existing_map[item["magnet_link"]] = item
         except Exception as e:
@@ -732,93 +754,97 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
     status_text = Text("Preparing...", style="dim")
     display_group = Group(progress, status_text)
 
+    # 1. Matching Logic (Parallel or Serial)
     with Live(display_group, console=console, refresh_per_second=10):
         task_id = progress.add_task("[bold green]Matching Content...", total=len(data))
         
-        for entry in data:
-            parsed = parse_entry(entry)
-            
-            # Restore existing match data
-            magnet = parsed.get("magnet_link") or entry.get("magnet_link")
-            if magnet and magnet in existing_map:
-                existing = existing_map[magnet]
-                if existing.get("matched_name"):
-                    parsed["matched_name"] = existing["matched_name"]
-                    parsed["matched_path"] = existing.get("matched_path")
-                    parsed["matched_id"] = existing.get("matched_id")
-            
-            is_manga = parsed.get("type") == "Manga"
-            
-            # Update status with parsed names
-            pnames = ", ".join(parsed.get('parsed_name', []))
-            if len(pnames) > 80:
-                pnames = pnames[:77] + "..."
-            
-            # Only show "Matching: ..." for Manga, otherwise just show processing
-            if is_manga:
-                status_text.plain = f"Matching: {pnames}"
-            else:
-                status_text.plain = f"Skipping {parsed.get('type')}: {pnames}"
-            
-            # Match against library
-            matched_series = None
-            if is_manga and library_series:
-                 if parsed.get("matched_name") and parsed.get("matched_path") in series_by_path:
-                     matched_series = series_by_path[parsed["matched_path"]]
-                     status_text.plain = f"Existing Match: {pnames} -> [dim green]{parsed['matched_name']}[/dim green]"
-                     matched_library_paths.add(parsed["matched_path"])
-                 else:
-                     for name in parsed.get("parsed_name", []):
-                         matched_series = _find_best_match(name, library_series)
-                         if matched_series:
-                             parsed["matched_path"] = str(matched_series.path)
-                             parsed["matched_name"] = matched_series.name
-                             
-                             # Compute ID (Relative Path)
-                             if library and library.path:
-                                 try:
-                                     rel = matched_series.path.relative_to(library.path)
-                                     # Ensure forward slashes for consistency
-                                     parsed["matched_id"] = str(rel).replace("\\", "/")
-                                 except ValueError:
-                                     parsed["matched_id"] = matched_series.name
-                             else:
-                                 parsed["matched_id"] = matched_series.name
-                                 
-                             matched_library_paths.add(str(matched_series.path))
-                             status_text.plain = f"Matching: {pnames} -> [bold green]MATCHED: {matched_series.name}[/bold green]"
-                             break
-            
-            # INTEGRATION: Update Series external_data
-            if matched_series:
-                 if "nyaa_matches" not in matched_series.external_data:
-                     matched_series.external_data["nyaa_matches"] = []
-                 
-                 # Check if this magnet is already in external_data
-                 existing_magnets = {m.get("magnet_link") for m in matched_series.external_data["nyaa_matches"]}
-                 if magnet and magnet not in existing_magnets:
-                     match_entry = {
-                         "name": parsed.get("name"),
-                         "magnet_link": magnet,
-                         "size": parsed.get("size"),
-                         "date": parsed.get("date"),
-                         "seeders": parsed.get("seeders"),
-                         "leechers": parsed.get("leechers"),
-                         "completed": parsed.get("completed"),
-                         "type": parsed.get("type"),
-                         "volume_begin": parsed.get("volume_begin"),
-                         "volume_end": parsed.get("volume_end"),
-                         "chapter_begin": parsed.get("chapter_begin"),
-                         "chapter_end": parsed.get("chapter_end")
-                     }
-                     matched_series.external_data["nyaa_matches"].append(match_entry)
-            
-            # If no new match found BUT we have an existing ID/Name, we should track it for stats
-            if parsed.get("matched_path"):
-                 matched_library_paths.add(parsed["matched_path"])
+        # Determine number of workers
+        num_workers = multiprocessing.cpu_count() if parallel else 1
+        if not parallel:
+             logger.info("Running in serial mode (--no-parallel)")
+        
+        if parallel and len(data) > 20: # Only use parallel for non-trivial amounts
+            logger.info(f"Parallel matching active (Workers: {num_workers})")
+            with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+                # Prepare tasks
+                futures = []
+                for entry in data:
+                    magnet = entry.get("magnet_link")
+                    existing = existing_map.get(magnet) if magnet else None
+                    futures.append(executor.submit(match_single_entry, entry, library_series_data, existing))
+                
+                # Process as completed to update progress bar
+                for future in concurrent.futures.as_completed(futures):
+                    parsed = future.result()
+                    processed_data.append(parsed)
+                    
+                    # Update status
+                    pnames = ", ".join(parsed.get('parsed_name', []))
+                    if len(pnames) > 80: pnames = pnames[:77] + "..."
+                    
+                    if parsed.get("matched_name"):
+                         status_text.plain = f"Matched: {pnames} -> {parsed['matched_name']}"
+                    else:
+                         status_text.plain = f"Processed: {pnames}"
+                         
+                    progress.advance(task_id)
+        else:
+            # Serial Mode
+            for entry in data:
+                magnet = entry.get("magnet_link")
+                existing = existing_map.get(magnet) if magnet else None
+                parsed = match_single_entry(entry, library_series_data, existing)
+                processed_data.append(parsed)
+                
+                pnames = ", ".join(parsed.get('parsed_name', []))
+                if len(pnames) > 80: pnames = pnames[:77] + "..."
+                if parsed.get("matched_name"):
+                     status_text.plain = f"Matched: {pnames} -> {parsed['matched_name']}"
+                else:
+                     status_text.plain = f"Processed: {pnames}"
+                progress.advance(task_id)
 
-            processed_data.append(parsed)
-            progress.advance(task_id)
+    # 2. Integration & ID Generation (Main Process Only)
+    # After parallel matching, we need to update the real Library object and generate IDs
+    for parsed in processed_data:
+        mpath = parsed.get("matched_path")
+        if not mpath or mpath not in series_by_path:
+            continue
+            
+        matched_series = series_by_path[mpath]
+        matched_library_paths.add(mpath)
+        
+        # Compute ID (Relative Path)
+        if library and library.path:
+            try:
+                rel = matched_series.path.relative_to(library.path)
+                parsed["matched_id"] = str(rel).replace("\\", "/")
+            except ValueError:
+                parsed["matched_id"] = matched_series.name
+        else:
+            parsed["matched_id"] = matched_series.name
+
+        # Update Series external_data
+        if "nyaa_matches" not in matched_series.external_data:
+            matched_series.external_data["nyaa_matches"] = []
+        
+        magnet = parsed.get("magnet_link")
+        existing_magnets = {m.get("magnet_link") for m in matched_series.external_data["nyaa_matches"]}
+        if magnet and magnet not in existing_magnets:
+            matched_series.external_data["nyaa_matches"].append({
+                "name": parsed.get("name"),
+                "magnet_link": magnet,
+                "size": parsed.get("size"),
+                "date": parsed.get("date"),
+                "seeders": parsed.get("seeders"),
+                "leechers": parsed.get("leechers"),
+                "completed": parsed.get("completed"),
+                "type": parsed.get("type"),
+                "volume_begin": parsed.get("volume_begin"),
+                "volume_end": parsed.get("volume_end"),
+                "chapter_begin": parsed.get("chapter_begin"),
+                "chapter_end": parsed.get("chapter_end")
+            })
 
     # Propagate matches to peers in the same group
     propagated = _propagate_matches(processed_data)
@@ -837,25 +863,19 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
         save_library_cache(library)
         console.print(f"[green]Integrated matches into library state.[/green]")
 
-    # Prepare Data for Display
-    table_data = processed_data
-    if consolidate:
-        table_data = consolidate_entries(processed_data)
+    # Prepare Data for Display (Always Consolidate)
+    table_data = consolidate_entries(processed_data)
 
-    if summarize and not no_table:
-        title = "Match Summary (Consolidated)" if consolidate else "Match Summary"
+    if show_table:
+        title = "Match Summary (Consolidated)"
         table = Table(title=title, show_lines=True)
         table.add_column("#", style="dim", justify="right", width=4)
         table.add_column("Type", style="bold white", width=12)
         table.add_column("Parsed Name(s)", style="green")
         
-        if consolidate:
-            table.add_column("Volumes", style="cyan", justify="left")
-            table.add_column("Chapters", style="blue", justify="left")
-            table.add_column("Files", style="yellow", justify="right")
-        else:
-            table.add_column("Vol", style="cyan", justify="center")
-            table.add_column("Ch", style="blue", justify="center")
+        table.add_column("Volumes", style="cyan", justify="left")
+        table.add_column("Chapters", style="blue", justify="left")
+        table.add_column("Files", style="yellow", justify="right")
 
         display_index = 1
         for entry in table_data:
@@ -883,64 +903,33 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
             if name_display.startswith("SKIPPED:") and len(name_display) > 60:
                 name_display = name_display[:57] + "..."
 
-            if consolidate:
-                vol_display = "\n".join(entry.get("consolidated_volumes", []))
-                chap_display = "\n".join(entry.get("consolidated_chapters", []))
-                if len(vol_display) > 200: vol_display = vol_display[:197] + "..."
-                if len(chap_display) > 200: chap_display = chap_display[:197] + "..."
-                
-                table.add_row(
-                    str(display_index),
-                    entry.get("type", "?"),
-                    name_display,
-                    vol_display,
-                    chap_display,
-                    str(entry.get("file_count", 1)),
-                    style=style
-                )
-            else:
-                vol_str = ""
-                if entry.get("volume_begin"):
-                    vol_str = f"{entry['volume_begin']}"
-                    if entry.get("volume_end") and entry['volume_end'] != entry['volume_begin']:
-                        vol_str += f"-{entry['volume_end']}"
-                ch_str = ""
-                if entry.get("chapter_begin"):
-                    ch_str = f"{entry['chapter_begin']}"
-                    if entry.get("chapter_end") and entry['chapter_end'] != entry['chapter_begin']:
-                        ch_str += f"-{entry['chapter_end']}"
-                        
-                table.add_row(
-                    str(display_index),
-                    entry.get("type", "?"),
-                    name_display,
-                    vol_str,
-                    ch_str,
-                    style=style
-                )
+            vol_display = "\n".join(entry.get("consolidated_volumes", []))
+            chap_display = "\n".join(entry.get("consolidated_chapters", []))
+            if len(vol_display) > 200: vol_display = vol_display[:197] + "..."
+            if len(chap_display) > 200: chap_display = chap_display[:197] + "..."
+            
+            table.add_row(
+                str(display_index),
+                entry.get("type", "?"),
+                name_display,
+                vol_display,
+                chap_display,
+                str(entry.get("file_count", 1)),
+                style=style
+            )
             display_index += 1
         console.print(table)
 
-    if summary:
+    if show_stats:
         elapsed = time.time() - start_time
         
         # Stats Calculation
         total_scraped = len(processed_data)
         manga_entries = [e for e in processed_data if e.get("type") == "Manga"]
-        total_manga_scraped = len(manga_entries)
         
-        # Count matched *scraped* items
-        # If consolidated, we check table_data
-        # If not, we check processed_data
-        
-        matched_scraped_count = 0
-        if consolidate:
-             # In consolidated view, an entry is matched if it has a match
-             matched_scraped_count = sum(1 for e in table_data if e.get("matched_name") and e.get("type") == "Manga")
-             total_manga_for_calc = sum(1 for e in table_data if e.get("type") == "Manga")
-        else:
-             matched_scraped_count = sum(1 for e in manga_entries if e.get("matched_name"))
-             total_manga_for_calc = total_manga_scraped
+        # Count matched *scraped* items using consolidated data
+        matched_scraped_count = sum(1 for e in table_data if e.get("matched_name") and e.get("type") == "Manga")
+        total_manga_for_calc = sum(1 for e in table_data if e.get("type") == "Manga")
 
         match_rate = 0.0
         if total_manga_for_calc > 0:
@@ -967,7 +956,7 @@ def process_match(input_file: str, output_file: str, summarize: bool, consolidat
         cards = [
             make_stat(f"{elapsed:.2f}s", "Duration", "cyan"),
             make_stat(f"{total_scraped}", "Scraped Items", "white"),
-            make_stat(f"{total_manga_for_calc}", "Manga Groups" if consolidate else "Manga Entries", "blue"),
+            make_stat(f"{total_manga_for_calc}", "Manga Groups", "blue"),
         ]
         console.print(Columns(cards))
         
