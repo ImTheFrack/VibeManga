@@ -154,7 +154,8 @@ def call_ai(
     provider: Literal["remote", "local"] = "remote",
     model: Optional[str] = None,
     temperature: float = 0.7,
-    json_mode: bool = True
+    json_mode: bool = True,
+    status_callback: Optional[callable] = None
 ) -> Union[Dict[str, Any], str, None]:
     """
     Calls the configured AI backend with retries.
@@ -232,7 +233,11 @@ def call_ai(
 
     for attempt in range(AI_MAX_RETRIES + 1):
         try:
-            logger.debug(f"Calling AI ({provider}) [Attempt {attempt+1}/{AI_MAX_RETRIES+1}]: {endpoint} with model {target_model}")
+            msg = f"Calling AI ({provider}) [Attempt {attempt+1}/{AI_MAX_RETRIES+1}]"
+            logger.debug(f"{msg}: {endpoint} with model {target_model}")
+            if status_callback:
+                status_callback(msg)
+
             response = requests.post(
                 endpoint,
                 headers=headers,
@@ -269,7 +274,10 @@ def call_ai(
                 if parsed:
                     return parsed
                 else:
-                    logger.warning(f"AI response JSON parse failed (Attempt {attempt+1}/{AI_MAX_RETRIES+1})")
+                    msg = f"AI response JSON parse failed (Attempt {attempt+1}/{AI_MAX_RETRIES+1})"
+                    logger.debug(msg)
+                    if status_callback:
+                        status_callback(f"[yellow]{msg}[/yellow]")
                     if attempt < AI_MAX_RETRIES:
                         time.sleep(1)
                         continue
@@ -285,7 +293,10 @@ def call_ai(
                 logger.error(f"AI API Forbidden (403). Your API Key for {provider} may not have access to model '{target_model}' or the provider is blocking the request.")
                 return None # Don't retry forbidden
             elif status_code == 429:
-                 logger.warning(f"AI API Rate Limit (429). Retrying after delay...")
+                 msg = "AI API Rate Limit (429). Retrying after delay..."
+                 logger.debug(msg)
+                 if status_callback:
+                     status_callback(f"[yellow]{msg}[/yellow]")
                  time.sleep(2 * (attempt + 1))
                  continue
             else:

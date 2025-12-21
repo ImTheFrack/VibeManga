@@ -14,6 +14,7 @@ from rich.tree import Tree
 from rich.table import Table
 from rich import box
 
+from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 from rich.live import Live
 from rich.console import Group
@@ -25,6 +26,7 @@ from rich.columns import Columns
 from rich.align import Align
 import datetime
 import json
+import time
 
 from .scanner import scan_library, enrich_series
 from .models import Library, Category, Series
@@ -58,18 +60,20 @@ from .constants import (
 from .ai_api import get_available_models
 from .config import load_ai_config, save_ai_config, get_role_config
 
+# Initialize Rich Console
+console = Console()
+
 # Configure logging
 log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# File Handler (Full Detail)
-file_handler = logging.FileHandler('vibe_manga.log')
+# File Handler (Full Detail) - Use UTF-8 to prevent encoding errors on Windows
+file_handler = logging.FileHandler('vibe_manga.log', encoding='utf-8')
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(log_formatter)
 
-# Stream Handler (Console - Errors and Warnings)
-stream_handler = logging.StreamHandler()
+# Stream Handler (Console - Errors and Warnings) - Use RichHandler for better Unicode support
+stream_handler = RichHandler(console=console, show_path=False, keywords=[])
 stream_handler.setLevel(logging.WARNING)
-stream_handler.setFormatter(log_formatter)
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
@@ -79,8 +83,6 @@ root_logger.addHandler(file_handler)
 root_logger.addHandler(stream_handler)
 
 logger = logging.getLogger(__name__)
-
-console = Console()
 
 def select_model_interactive(models: List[str], default: Optional[str] = None) -> str:
     """
@@ -462,28 +464,49 @@ def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, proces
     table.add_column("Genres/Tags", style="dim")
     table.add_column("Authors", style="cyan")
 
+    # Final AI Report
     from .ai_api import tracker
-
-    with Progress(
+    
+    # Progress Layout
+    progress = Progress(
         SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("[dim]{task.fields[status]}[/dim]"),
+        TextColumn("[progress.description]{task.description}"),
         console=console
-    ) as progress:
-        task = progress.add_task("[green]Processing metadata...", total=len(targets), status="Ready")
+    )
+    
+    detail_text = Text("", style="dim italic")
+    display_group = Group(progress, detail_text)
+
+    with Live(display_group, console=console, refresh_per_second=PROGRESS_REFRESH_RATE):
+        task = progress.add_task("[green]Processing metadata...", total=len(targets))
         
         for series in targets:
-            progress.update(task, description=f"[green]Fetching: {series.name}[/green]", status="Calling API...")
+            progress.update(task, description=f"[green]Fetching: {series.name}[/green]")
+            detail_text.plain = "  → Starting..."
+            
+            def update_detail(msg: str):
+                detail_text.plain = ""
+                detail_text.append("  → ")
+                if "[" in msg and "]" in msg:
+                    detail_text.append(Text.from_markup(msg))
+                else:
+                    detail_text.append(msg)
+
             try:
-                # Callback or status update could happen here if we passed a function
-                # For now, we update status based on the synchronous call's return
-                meta, source = get_or_create_metadata(series.path, series.name, force_update=force_update, trust_jikan=trust_jikan)
+                meta, source = get_or_create_metadata(
+                    series.path, 
+                    series.name, 
+                    force_update=force_update, 
+                    trust_jikan=trust_jikan,
+                    status_callback=update_detail
+                )
                 
                 # Update status with source
                 color = "green" if "Trusted" in source or "Local" in source else "cyan" if "Jikan" in source else "magenta"
-                progress.update(task, status=f"[{color}]{source}[/{color}]")
+                detail_text.plain = ""
+                detail_text.append(Text.from_markup(f"  → [{color}]Completed via {source}[/{color}]"))
 
                 # Add to summary table (limit rows if too many)
                 if len(targets) <= 20 or force_update:
@@ -499,7 +522,8 @@ def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, proces
                     )
             except Exception as e:
                 logger.error(f"Error fetching metadata for {series.name}: {e}")
-                progress.update(task, status="[red]Error[/red]")
+                detail_text.plain = ""
+                detail_text.append(Text.from_markup("  → [red]Error occurred[/red]"))
             
             progress.advance(task)
 
