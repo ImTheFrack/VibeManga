@@ -89,8 +89,10 @@ The project uses complex regex patterns to handle the wide variety of manga nami
 4.  **Priority**: Ranges (`v01-05`) are prioritized over single numbers (`v01`) in regex groups to prevent partial matches.
 
 ### Directory Structure
-The logic *heavily* relies on the folder structure being `Category/SubCategory/Series/`. Deviations from this depth may result in data being missed or miscategorized.
-
+The logic *heavily* relies on the folder structure being `Category/SubCategory/Series/`. Deviations from this depth may result in data being missed or miscategorized.  Manga is preferred to be stored as a string composed of the following elements:
+  a. {Series} A sanitized name, ending with articles (The, An, Le, etc.), e.g. "One Piece" or "Lucky Man, The"
+  b. {vXX}: two digits of the volume number prefaced by v, e.g. "v01" v99"
+  c. {XXX[.X]): three digits of the chapter number with no preface, e.g. "001", "020.5", "199"}
 ## Current Commands
 *   `stats`: Scans the library and shows high-level metrics, category breakdowns, and optional continuity checks (`--continuity`).
 *   `tree --depth [n]`: Visualizes the folder hierarchy.

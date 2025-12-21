@@ -960,14 +960,15 @@ def match(query: Optional[str], input_file: str, output_file: str, table: bool, 
 @click.argument("name", required=False)
 @click.option("--input-file", default="nyaa_match_results.json", help="Matched results JSON.")
 @click.option("--status", is_flag=True, help="Show current qBittorrent downloads for VibeManga.")
-def grab(name: Optional[str], input_file: str, status: bool) -> None:
+@click.option("--auto-add", is_flag=True, help="Automatically add torrents if they contain new volumes.")
+def grab(name: Optional[str], input_file: str, status: bool, auto_add: bool) -> None:
     """
     Selects a manga from matched results and adds it to qBittorrent.
     
     NAME can be a parsed name from the JSON or 'next' to get the first unflagged entry.
     """
     root_path = get_library_root()
-    process_grab(name, input_file, status, root_path)
+    process_grab(name, input_file, status, root_path, auto_add=auto_add)
 
 @cli.command()
 @click.option("--input-file", default="nyaa_match_results.json", help="Matched results JSON to update status.")

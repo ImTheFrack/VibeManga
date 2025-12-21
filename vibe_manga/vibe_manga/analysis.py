@@ -44,11 +44,11 @@ VOL_REGEX = re.compile(r'''
 
 # 2. Chapter Patterns
 CH_REGEX = re.compile(r'''
-    \b(?:c|ch\.?|chapter|\x23) # Prefix: c, ch, ch., chapter, or #
+    \b(?:c|ch\.?|chapter|ep(?:isode)?|\x23) # Prefix: c, ch, ch., chapter, ep, episode, or #
     [\s\._\[]*              # Separator: Optional space, dot, underscore, or bracket
     (?:                     # START ALTERNATIVES
         # OPTION A: Range (e.g. c01-05 or c01-c05)
-        (\d+(?:\.\d+)?)\s*[-~]\s*(?:c|ch\.?|chapter|\x23)?  # Group 1: Start Number
+        (\d+(?:\.\d+)?)\s*[-~]\s*(?:c|ch\.?|chapter|ep(?:isode)?|\x23)?  # Group 1: Start Number
         \s*
         (\d+(?:\.\d+)?)
     |                       # OR
@@ -57,10 +57,23 @@ CH_REGEX = re.compile(r'''
     )                       # END ALTERNATIVES
 ''', re.IGNORECASE | re.VERBOSE)
 
-# 3. Fallback (Raw Numbers)
+# 3. Unit Patterns (Explicit 'unit' prefix)
+UNIT_REGEX = re.compile(r'''
+    \b(?:unit|u)           # Prefix: unit or u
+    [\s\._\[]*             # Separator
+    (?:
+        (\d+(?:\.\d+)?)\s*[-~]\s*(?:unit|u)?
+        \s*
+        (\d+(?:\.\d+)?)
+    |
+        (\d+(?:\.\d+)?)
+    )
+''', re.IGNORECASE | re.VERBOSE)
+
+# 4. Fallback (Raw Numbers)
 FALLBACK_NUMBER_REGEX = re.compile(r'\b(\d+(?:\.\d+)?)\b')
 
-# 4. Implicit Ranges (001-099) - Used if no explicit prefixes found
+# 5. Implicit Ranges (001-099) - Used if no explicit prefixes found
 IMPLICIT_RANGE_REGEX = re.compile(r'\b(\d+(?:\.\d+)?)\s*[-~]\s*(\d+(?:\.\d+)?)\b')
 
 # Patterns to strip BEFORE parsing numbers
@@ -101,7 +114,9 @@ def classify_unit(name: str) -> Tuple[List[float], List[float], List[float]]:
     vol_nums, ch_nums, unknown_nums = [], [], []
     vol_nums.extend(_parse_regex_matches(VOL_REGEX.findall(clean_name)))
     ch_nums.extend(_parse_regex_matches(CH_REGEX.findall(clean_name)))
-    if not vol_nums and not ch_nums:
+    unknown_nums.extend(_parse_regex_matches(UNIT_REGEX.findall(clean_name)))
+    
+    if not vol_nums and not ch_nums and not unknown_nums:
         r_matches = IMPLICIT_RANGE_REGEX.findall(clean_name)
         unknown_nums.extend(_parse_regex_matches([(m[0], m[1], None) for m in r_matches]))
         if not unknown_nums:

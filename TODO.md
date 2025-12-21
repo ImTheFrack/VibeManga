@@ -118,7 +118,12 @@
 
 ## Version History
 
-### v2.0 (Current)
+### v3.0 (Current)
+- Grabbing functionality
+- Pulling functionality
+- Parallelization of matching
+ 
+### v2.0 (Last)
 - Smart caching with TTL
 - Comprehensive logging system
 - Full type hints coverage

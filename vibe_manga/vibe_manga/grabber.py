@@ -5,6 +5,7 @@ import logging
 import click
 import time
 import shutil
+import difflib
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -27,7 +28,8 @@ from .constants import (
     BYTES_PER_MB,
     BYTES_PER_GB,
     PROGRESS_REFRESH_RATE,
-    PULL_TEMPDIR
+    PULL_TEMPDIR,
+    FUZZY_MATCH_THRESHOLD
 )
 from .cache import load_library_state, save_library_cache
 from .matcher import consolidate_entries, parse_entry
@@ -73,7 +75,29 @@ def get_matched_or_parsed_name(torrent_name: str, library: Optional[Any] = None,
     parsed = parse_entry({"name": torrent_name})
     parsed_names = parsed.get("parsed_name", [])
     if parsed_names and not any(n.startswith("SKIPPED:") for n in parsed_names):
-        return " | ".join(parsed_names)
+        # Filter out substrings to avoid redundancy (e.g. if we have "A", "B", and "A | B", just keep "A | B")
+        # This handles the case where parse_entry returns both the parts and the combined string.
+        unique_names = []
+        # Sort by length descending so we keep the "superstring" candidates first
+        sorted_candidates = sorted(list(set(parsed_names)), key=len, reverse=True)
+        
+        for candidate in sorted_candidates:
+            # If this candidate is not a substring of any already selected name (which are longer/equal)
+            # Note: We need to be careful. "Ten" is in "Ten Ten". 
+            # But for "A | B", A is definitely in it.
+            # Using semantic normalization for comparison might be safer but raw check works for literal splits.
+            is_substring = False
+            for selected in unique_names:
+                if candidate in selected:
+                    is_substring = True
+                    break
+            
+            if not is_substring:
+                unique_names.append(candidate)
+                
+        # Reverse back to restore some logical order (though order was lost by set/sort)
+        # Actually, let's just use the filtered list.
+        return " | ".join(unique_names)
     
     return f"[dim]{torrent_name}[/dim]"
 
@@ -83,13 +107,27 @@ def find_series_match(torrent_name: str, library: Optional[Any] = None) -> Optio
         return None
     
     norm_t_name = semantic_normalize(torrent_name)
+    best_match = None
+    best_ratio = 0.0
+
     for cat in library.categories:
         for sub in cat.sub_categories:
             for s in sub.series:
                 norm_s_name = semantic_normalize(s.name)
-                if norm_s_name and norm_s_name in norm_t_name:
+                if not norm_s_name: continue
+                
+                # 1. Exact Match (Normalized)
+                if norm_s_name == norm_t_name:
                     return s
-    return None
+                
+                # 2. Fuzzy Match
+                ratio = difflib.SequenceMatcher(None, norm_t_name, norm_s_name).ratio() * 100
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    if ratio >= FUZZY_MATCH_THRESHOLD:
+                        best_match = s
+
+    return best_match
 
 def vibe_format_range(numbers: List[float], prefix: str = "", pad: int = 0) -> str:
     """Formats a list of numbers into a consistent string (e.g., v01, 001.5)."""
@@ -158,7 +196,7 @@ def normalize_pull_filenames(pull_dir: Path, series_name: str) -> None:
             c_prefix = ""
             if not c_nums and not v_nums and u_nums:
                 c_nums = u_nums
-                c_prefix = "unit" # Use unit prefix for naked numbers
+                c_prefix = "c" # Use chapter prefix for naked numbers
                 
             c_str = vibe_format_range(c_nums, prefix=c_prefix, pad=3)
             
@@ -193,7 +231,7 @@ def normalize_pull_filenames(pull_dir: Path, series_name: str) -> None:
             
             progress.advance(task)
 
-def process_grab(name: Optional[str], input_file: str, status: bool, root_path: str) -> None: 
+def process_grab(name: Optional[str], input_file: str, status: bool, root_path: str, auto_add: bool = False) -> None: 
     """
     Selects a manga from matched results and adds it to qBittorrent.
     
@@ -202,6 +240,7 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
         input_file: Path to the JSON file with match results.
         status: If True, show current qBittorrent status instead of grabbing.
         root_path: Path to the library root directory.
+        auto_add: If True, automatically grab new volumes without prompting.
     """
     qbit = QBitAPI()
 
@@ -304,11 +343,7 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
     while current_idx < len(manga_groups):
         group = manga_groups[current_idx]
 
-        console.print(Rule(style="dim"))
-        # Show selection info
-        console.print(Panel(f"[bold cyan]Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])}[/bold cyan]"))
-        
-        # List all files in this group
+        # Identify group files
         group_files = []
         group_names = set(group["parsed_name"])
         for e in data:
@@ -317,57 +352,156 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
 
         match_id = group.get("matched_id")
         local_series = series_map.get(match_id) if match_id else None
+
+        # Pre-calculate content analysis for auto-skip
+        l_v_nums, l_c_nums = [], []
+        l_v_set, l_c_set = set(), set()
+        new_v, new_c = set(), set()
+        max_torrent_bytes = 0
+        
+        if local_series:
+            all_local_vols = local_series.volumes + [v for sg in local_series.sub_groups for v in sg.volumes]
+            for v in all_local_vols:
+                v_n, c_n, u_n = classify_unit(v.name)
+                l_v_nums.extend(v_n); l_c_nums.extend(c_n + u_n)
+            
+            l_v_set = set(l_v_nums)
+            l_c_set = set(l_c_nums)
+            
+            for f in group_files:
+                t_bytes = parse_size(f.get("size"))
+                if t_bytes > max_torrent_bytes:
+                    max_torrent_bytes = t_bytes
+
+                v_s, v_e = f.get("volume_begin"), f.get("volume_end")
+                if v_s is not None:
+                    try:
+                        s, e = float(v_s), float(v_e or v_s)
+                        if s.is_integer() and e.is_integer():
+                            for n in range(int(s), int(e) + 1):
+                                if float(n) not in l_v_set: new_v.add(float(n))
+                        else:
+                            if s not in l_v_set: new_v.add(s)
+                            if e not in l_v_set: new_v.add(e)
+                    except (ValueError, TypeError): pass
+                
+                c_s, c_e = f.get("chapter_begin"), f.get("chapter_end")
+                if c_s is not None:
+                    try:
+                        s, e = float(c_s), float(c_e or c_s)
+                        if s.is_integer() and e.is_integer():
+                            for n in range(int(s), int(e) + 1):
+                                if float(n) not in l_c_set: new_c.add(float(n))
+                        else:
+                            if s not in l_c_set: new_c.add(s)
+                            if e not in l_c_set: new_c.add(e)
+                    except (ValueError, TypeError): pass
+
+            # Auto-skip if no new content
+            if not new_v and not new_c:
+                console.print(f"[dim]Auto-skipping Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (No new content)[/dim]")
+                for f in group_files:
+                    f["grab_status"] = "skipped"
+                
+                try:
+                    with open(input_file, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2)
+                except Exception as e:
+                    console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
+                
+                current_idx += 1
+                continue
+
+        # Auto-Add Logic
+        if auto_add:
+            def is_jxl(f):
+                n = f.get("name", "").lower()
+                return "jxl" in n or "jpeg-xl" in n or "jpegxl" in n
+            
+            def is_completed(f):
+                return "completed" in f.get("name", "").lower()
+
+            # Sort: Prefer Non-JXL (True > False), then Seeders
+            sorted_group_files = sorted(
+                group_files, 
+                key=lambda x: (not is_jxl(x), int(x.get("seeders", 0))), 
+                reverse=True
+            )
+            
+            files_to_auto_add = []
+            volumes_handled_in_group = set()
+            added_via_completed = False
+
+            for f in sorted_group_files:
+                v_nums, _, _ = classify_unit(f.get("name", ""))
+                
+                # Criterion 1: New Volumes
+                if v_nums:
+                    # Criteria: Must have volumes not in local library
+                    new_vols_in_file = [v for v in v_nums if v not in l_v_set]
+                    
+                    if not local_series or new_vols_in_file:
+                        # For new series, all volumes are "new"
+                        v_to_check = v_nums if not local_series else new_vols_in_file
+                        
+                        # Check if this torrent provides any volumes we haven't already decided to grab in this group
+                        if any(v not in volumes_handled_in_group for v in v_to_check):
+                            grabbing_str = format_ranges(v_to_check)
+                            if not local_series:
+                                reason = f"New series, grabbing volumes {grabbing_str}"
+                            else:
+                                local_str = format_ranges(list(l_v_set))
+                                if len(local_str) > 30: local_str = local_str[:27] + "..."
+                                reason = f"Existing volumes {local_str}, grabbing {grabbing_str}"
+                            
+                            files_to_auto_add.append((f, reason))
+                            volumes_handled_in_group.update(v_to_check)
+                            continue # Move to next file
+                
+                # Criterion 2: New Series + "Completed" tag (Handles Chapter-only series)
+                if not local_series and is_completed(f) and not added_via_completed:
+                    # Check if we already grabbed a 'completed' set (or volumes) to avoid duplicates
+                    # If it's a chapter-only series, volumes_handled_in_group will be empty.
+                    files_to_auto_add.append((f, "New completed series"))
+                    added_via_completed = True
+            
+            if files_to_auto_add:
+                console.print(f"[bold blue]Auto-Adding {len(files_to_auto_add)} torrent(s) for: {', '.join(group['parsed_name'])}[/bold blue]")
+                added_count = 0
+                for f, reason in files_to_auto_add:
+                    magnet = f.get("magnet_link")
+                    if magnet:
+                        if qbit.add_torrent([magnet], tag=QBIT_DEFAULT_TAG, savepath=QBIT_DEFAULT_SAVEPATH):
+                            console.print(f"[green] + Added: {f.get('name')}[/green]")
+                            console.print(f"   [dim]Reason: {reason}[/dim]")
+                            f["grab_status"] = "grabbed"
+                            added_count += 1
+                        else:
+                            console.print(f"[red] - Failed to add: {f.get('name')}[/red]")
+                
+                if added_count > 0:
+                    try:
+                        with open(input_file, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, indent=2)
+                    except Exception as e:
+                        console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
+                    
+                    current_idx += 1
+                    continue
+
+        console.print(Rule(style="dim"))
+        # Show selection info
+        console.print(Panel(f"[bold cyan]Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])}[/bold cyan]"))
         
         if group.get("matched_name"):
             console.print(f"[green]Library Match: {group['matched_name']}[/green]")
             
             if local_series:
-                all_local_vols = local_series.volumes + [v for sg in local_series.sub_groups for v in sg.volumes]
-                l_v_nums, l_c_nums = [], []
-                for v in all_local_vols:
-                    v_n, c_n, u_n = classify_unit(v.name)
-                    l_v_nums.extend(v_n); l_c_nums.extend(c_n + u_n)
-                
+                # Use pre-calculated values
                 l_vols = format_ranges(l_v_nums)
                 l_chaps = format_ranges(l_c_nums)
-                
                 size_str = format_size(local_series.total_size_bytes)
                 console.print(f"[bold yellow]Local Content: Vols: {l_vols} | Chaps: {l_chaps} | Size: {size_str}[/bold yellow]")
-
-                # Calculate New Content
-                l_v_set = set(l_v_nums)
-                l_c_set = set(l_c_nums)
-                new_v, new_c = set(), set()
-                max_torrent_bytes = 0
-                
-                for f in group_files:
-                    t_bytes = parse_size(f.get("size"))
-                    if t_bytes > max_torrent_bytes:
-                        max_torrent_bytes = t_bytes
-
-                    v_s, v_e = f.get("volume_begin"), f.get("volume_end")
-                    if v_s is not None:
-                        try:
-                            s, e = float(v_s), float(v_e or v_s)
-                            if s.is_integer() and e.is_integer():
-                                for n in range(int(s), int(e) + 1):
-                                    if float(n) not in l_v_set: new_v.add(float(n))
-                            else:
-                                if s not in l_v_set: new_v.add(s)
-                                if e not in l_v_set: new_v.add(e)
-                        except (ValueError, TypeError): pass
-                    
-                    c_s, c_e = f.get("chapter_begin"), f.get("chapter_end")
-                    if c_s is not None:
-                        try:
-                            s, e = float(c_s), float(c_e or c_s)
-                            if s.is_integer() and e.is_integer():
-                                for n in range(int(s), int(e) + 1):
-                                    if float(n) not in l_c_set: new_c.add(float(n))
-                            else:
-                                if s not in l_c_set: new_c.add(s)
-                                if e not in l_c_set: new_c.add(e)
-                        except (ValueError, TypeError): pass
 
                 msg_parts = []
                 if new_v or new_c:
@@ -378,7 +512,7 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                         part += f" [{len(new_c)} new chaps: {format_ranges(list(new_c))}]"
                     part += "[/bold green]"
                     msg_parts.append(part)
-                
+            
                 # Size hints
                 diff = max_torrent_bytes - local_series.total_size_bytes
                 if max_torrent_bytes > local_series.total_size_bytes * 1.1:
@@ -683,9 +817,10 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
         
         # Sanitize for filesystem (especially for Windows where | : ? * are illegal)
         # We replace them with full-width equivalents that are legal and look similar.
-        replacements = {"|": "｜", ":": "：", "?": "？", "*": "＊", "<": "＜", ">": "＞", "\"": "＂"}
+        replacements = {"|": "｜", ":": "：", "?": "？", "*": "＊", "<": "＜", ">": "＞", "\"": "＂", "/": "／", "\\": "＼"}
         for char, rep in replacements.items():
             series_name = series_name.replace(char, rep)
+        series_name = series_name.strip(" .")
         
         action_msg = f"[4/8] Normalizing filenames for: {series_name}"
         if simulate:
@@ -791,6 +926,10 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                         if not fills_gap:
                             if any(n not in l_v_set for n in v_nums) or any(n not in l_c_set for n in ch_nums):
                                 fills_gap = True
+                            # Also check units (treated as chapters/unknowns)
+                            if not fills_gap and file_info.get("u"):
+                                if any(n not in l_c_set for n in file_info["u"]):
+                                    fills_gap = True
                         if fills_gap:
                             files_to_import.append(file_info)
                             if (target_dir / f_path.name).exists():
@@ -807,16 +946,108 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                                 console.print("[yellow][6/8] Import aborted by user.[/yellow]")
                                 break
 
+                        # --- Subfolder Management Logic ---
+                        # Determine if we should use subfolders and what they should be named
+                        use_subfolders = False 
+                        
+                        # Gather all volume numbers (local + new)
+                        all_vols_set = set(l_v_set)
+                        all_chaps_set = set(l_c_set)
+                        for f in files_to_import:
+                            all_vols_set.update(f['v'])
+                            all_chaps_set.update(f['c'])
+                            all_chaps_set.update(f['u']) # Treat units as chapters for separation purposes
+                        
+                        has_volumes = bool(all_vols_set)
+                        has_chapters = bool(all_chaps_set)
+
+                        target_vol_path = target_dir
+                        target_chap_path = target_dir
+
+                        if all_vols_set:
+                            min_v = min(all_vols_set)
+                            max_v = max(all_vols_set)
+                            
+                            def fmt_num(n):
+                                return str(int(n)).zfill(2) if n.is_integer() else str(n).zfill(2)
+
+                            # Desired Folder Names
+                            # Format: {Series} v{Start}-v{End}
+                            vol_folder_name = f"{series_name} v{fmt_num(min_v)}-v{fmt_num(max_v)}"
+                            if min_v == max_v:
+                                vol_folder_name = f"{series_name} v{fmt_num(min_v)}"
+                                
+                            # Format: {Series} v{End+1}+
+                            chap_start = int(max_v) + 1
+                            chap_folder_name = f"{series_name} v{str(chap_start).zfill(2)}+"
+                            
+                            # Check for existing structure to rename/adopt
+                            existing_vol_dir = None
+                            existing_chap_dir = None
+                            
+                            s_name_esc = re.escape(series_name)
+                            # Regex to match: Series vXX-vYY OR Series vXX
+                            vol_pat = re.compile(rf"^{s_name_esc} v(\d+)(?:-v(\d+))?$", re.IGNORECASE)
+                            # Regex to match: Series vXX+
+                            chap_pat = re.compile(rf"^{s_name_esc} v(\d+)\+$", re.IGNORECASE)
+
+                            if target_dir.exists():
+                                for item in target_dir.iterdir():
+                                    if item.is_dir():
+                                        if vol_pat.match(item.name):
+                                            existing_vol_dir = item
+                                            use_subfolders = True
+                                        elif chap_pat.match(item.name):
+                                            existing_chap_dir = item
+                                            use_subfolders = True
+                            
+                            # Logic Update: Only enforce subfolders if we have BOTH types OR existing structure
+                            if not use_subfolders:
+                                if has_volumes and has_chapters:
+                                    use_subfolders = True
+                            
+                            if use_subfolders:
+                                # Prepare Paths
+                                target_vol_path = target_dir / vol_folder_name
+                                target_chap_path = target_dir / chap_folder_name
+                                
+                                # Rename Volume Folder if needed
+                                if existing_vol_dir and existing_vol_dir.name != vol_folder_name:
+                                    try:
+                                        console.print(f"[dim][6/8] Renaming volume folder: {existing_vol_dir.name} -> {vol_folder_name}[/dim]")
+                                        existing_vol_dir.rename(target_vol_path)
+                                    except Exception as e:
+                                        console.print(f"[red][6/8] Failed to rename volume folder: {e}[/red]")
+                                        target_vol_path = existing_vol_dir # Fallback
+                                
+                                # Rename Chapter Folder if needed
+                                if existing_chap_dir and existing_chap_dir.name != chap_folder_name:
+                                    try:
+                                        console.print(f"[dim][6/8] Renaming chapter folder: {existing_chap_dir.name} -> {chap_folder_name}[/dim]")
+                                        existing_chap_dir.rename(target_chap_path)
+                                    except Exception as e:
+                                        console.print(f"[red][6/8] Failed to rename chapter folder: {e}[/red]")
+                                        target_chap_path = existing_chap_dir # Fallback
+
                         imported_count = 0
                         for file_info in files_to_import:
                             f_path = file_info["path"]
+                            dest_folder = target_dir # Default
+                            
+                            # Determine specific destination based on content type
+                            if use_subfolders:
+                                if file_info['v']:
+                                    dest_folder = target_vol_path
+                                elif file_info['c'] or file_info['u']:
+                                    dest_folder = target_chap_path
+                            
                             try:
-                                if not target_dir.exists():
-                                    target_dir.mkdir(parents=True, exist_ok=True)
+                                if not dest_folder.exists():
+                                    dest_folder.mkdir(parents=True, exist_ok=True)
                                 
-                                dest_path = target_dir / f_path.name
+                                dest_path = dest_folder / f_path.name
                                 # We'll allow overwrite if the user confirmed the prompt above
-                                console.print(f"[dim][6/8] Importing {f_path.name} into {series_name}[/dim]")
+                                console.print(f"[dim][6/8] Importing {f_path.name} into {dest_folder.name}[/dim]")
                                 shutil.copy2(f_path, dest_path)
                                 imported_count += 1
                             except Exception as e:

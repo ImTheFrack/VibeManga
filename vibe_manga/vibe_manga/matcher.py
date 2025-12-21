@@ -91,7 +91,7 @@ MESSY_VOL_PATTERN = r"\b(?:v|vol)[0-9][0-9v._-]*\b"
 VOL_PATTERN = r"\b(?:v|vol(?:ume)?|parts)\.?\s*(\d+(?:\s*[-\.]\s*\d+)?)\b"
 
 # Explicit Chapter
-PREFIXED_CHAPTER_PATTERN = r"\b(?:ch|c|chapter)\.?\s*(\d+(?:[-\.]\d+)?)(?:\s*(?:-|to)\s*(?:ch|c|chapter)\.?\s*(\d+(?:[-\.]\d+)?))?"
+PREFIXED_CHAPTER_PATTERN = r"\b(?:ch|c|chapter|ep(?:isode)?)\.?\s*(\d+(?:[-\.]\d+)?)(?:\s*(?:-|to)\s*(?:ch|c|chapter|ep(?:isode)?)\.?\s*(\d+(?:[-\.]\d+)?))?"
 
 # Naked Chapter
 NAKED_CHAPTER_PATTERN = r"\b#?(\d+(?:\.\d+)?)(?:-(\d+(?:\.\d+)?))?\s*$"
@@ -138,11 +138,16 @@ def match_single_entry(entry: Dict[str, Any], library_series_data: List[Tuple[st
     
     # Restore existing match data if available
     magnet = parsed.get("magnet_link") or entry.get("magnet_link")
-    if existing_match and existing_match.get("matched_name"):
-        parsed["matched_name"] = existing_match["matched_name"]
-        parsed["matched_path"] = existing_match.get("matched_path")
-        parsed["matched_id"] = existing_match.get("matched_id")
-        return parsed
+    
+    if existing_match:
+        if "grab_status" in existing_match:
+            parsed["grab_status"] = existing_match["grab_status"]
+            
+        if existing_match.get("matched_name"):
+            parsed["matched_name"] = existing_match["matched_name"]
+            parsed["matched_path"] = existing_match.get("matched_path")
+            parsed["matched_id"] = existing_match.get("matched_id")
+            return parsed
 
     is_manga = parsed.get("type") == "Manga"
     if not is_manga or not library_series_data:
@@ -414,13 +419,23 @@ def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     clean_title = re.sub(r"\s+", " ", clean_title)
     
     # 7. Handle Multiple Names
-    if "|" in clean_title:
-        parts = [p.strip() for p in clean_title.split("|")]
+    if "|" in clean_title or "｜" in clean_title:
+        # Support both standard and full-width pipes as delimiters
+        s_char = "|" if "|" in clean_title else "｜"
+        parts = [p.strip() for p in clean_title.split(s_char)]
         parsed_names = [p for p in parts if p]
+        
+        # Keep the original full title as well to match combined library entries
+        # (e.g. if library has "JP | EN" as a single folder name)
+        if clean_title not in parsed_names:
+            parsed_names.append(clean_title)
     else:
         dual_match = re.match(DUAL_LANG_PATTERN, clean_title)
         if dual_match:
             parsed_names = [dual_match.group(1), dual_match.group(2)]
+            # Also keep full title for dual-lang heuristic
+            if clean_title not in parsed_names:
+                parsed_names.append(clean_title)
         elif clean_title and clean_title != "SKIPPED":
             parsed_names = [clean_title]
         else:
