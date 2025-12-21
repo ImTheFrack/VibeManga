@@ -80,3 +80,55 @@ class QBitAPI:
         except Exception as e:
             logger.error(f"Error getting torrents info: {e}")
             return []
+
+    def pause_torrents(self, hashes: List[str]) -> bool:
+        """Pause (stop) one or more torrents. Supports both old 'pause' and new 'stop' endpoints."""
+        if not self.sid and not self.login():
+            return False
+
+        # Try 'stop' first (qBit 4.6.0+)
+        stop_url = f"{self.base_url}/api/v2/torrents/stop"
+        data = {"hashes": "|".join(hashes)}
+
+        try:
+            response = self.session.post(stop_url, data=data)
+            if response.status_code == 200:
+                logger.info(f"Successfully stopped {len(hashes)} torrents")
+                return True
+            
+            # If 404, try the older 'pause' endpoint
+            if response.status_code == 404:
+                pause_url = f"{self.base_url}/api/v2/torrents/pause"
+                response = self.session.post(pause_url, data=data)
+                if response.status_code == 200:
+                    logger.info(f"Successfully paused {len(hashes)} torrents")
+                    return True
+
+            logger.error(f"Failed to stop/pause torrents: {response.status_code} {response.text}")
+            return False
+        except Exception as e:
+            logger.error(f"Error pausing torrents: {e}")
+            return False
+
+    def delete_torrents(self, hashes: List[str], delete_files: bool = True) -> bool:
+        """Delete one or more torrents, optionally deleting their downloaded data."""
+        if not self.sid and not self.login():
+            return False
+
+        delete_url = f"{self.base_url}/api/v2/torrents/delete"
+        data = {
+            "hashes": "|".join(hashes),
+            "deleteFiles": "true" if delete_files else "false"
+        }
+
+        try:
+            response = self.session.post(delete_url, data=data)
+            if response.status_code == 200:
+                logger.info(f"Successfully deleted {len(hashes)} torrents (delete_files={delete_files})")
+                return True
+            else:
+                logger.error(f"Failed to delete torrents: {response.status_code} {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Error deleting torrents: {e}")
+            return False

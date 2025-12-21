@@ -185,6 +185,21 @@ def normalize_series_name(name: str) -> str:
         return f"{match.group(2)}, {match.group(1)}"
     return name
 
+def semantic_normalize(name: str) -> str:
+    """
+    Highly aggressive normalization for semantic matching.
+    Strips articles, tags, punctuation, and whitespace.
+    """
+    if not name: return ""
+    # 1. Strip tags [...] (...) {...}
+    name = re.sub(r"\[.*?\]|\(.*?\)|\{.*?\}", " ", name)
+    # 2. Strip articles
+    name = re.sub(r"\b(The|A|An|Le|La|Les|Un|Une)\b", " ", name, flags=re.IGNORECASE)
+    # 3. Strip non-alphanumeric
+    name = re.sub(r"[^a-zA-Z0-9]", "", name)
+    # 4. Lowercase
+    return name.lower()
+
 def find_gaps(series: Series) -> List[str]:
     all_volumes = []
     all_volumes.extend(series.volumes)
@@ -344,7 +359,8 @@ def find_structural_duplicates(
     if not entities: return []
     warnings, name_map = [], {}
     for e in entities:
-        n = e['name'].lower().strip()
+        n = semantic_normalize(e['name'])
+        if not n: continue
         if n not in name_map: name_map[n] = []
         name_map[n].append(e)
     for group in name_map.values():

@@ -27,7 +27,8 @@ from .analysis import (
     find_structural_duplicates, 
     find_external_updates, 
     format_ranges, 
-    normalize_series_name,
+    
+    semantic_normalize,
     classify_unit,
     parse_size
 )
@@ -115,9 +116,18 @@ def _parse_range(start: str, end: Optional[str] = None) -> Tuple[Optional[str], 
             return parts[0], parts[1]
     return s, s
 
-def _normalize_name(name: str) -> str:
-    """Normalize name for comparison: lower case, strip non-alphanumeric."""
-    return re.sub(r"[^a-z0-9]", "", name.lower())
+def _get_count(start: Optional[str], end: Optional[str]) -> int:
+    """Helper to get count of items in a range string."""
+    if not start:
+        return 0
+    try:
+        s = float(start)
+        e = float(end) if end else s
+        if s.is_integer() and e.is_integer():
+            return int(abs(e - s)) + 1
+        return 1
+    except (ValueError, TypeError):
+        return 1
 
 def match_single_entry(entry: Dict[str, Any], library_series_data: List[Tuple[str, str, str]], existing_match: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
@@ -141,7 +151,7 @@ def match_single_entry(entry: Dict[str, Any], library_series_data: List[Tuple[st
     # Matching Logic
     best_match = None
     for name in parsed.get("parsed_name", []):
-        norm_name = _normalize_name(name)
+        norm_name = semantic_normalize(name)
         if not norm_name: continue
 
         # 1. Exact Match (Normalized)
@@ -498,7 +508,7 @@ def consolidate_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         names = entry.get("parsed_name", [])
         if not names: continue
         for name in names:
-            name_key = _normalize_name(name)
+            name_key = semantic_normalize(name)
             if not name_key: continue
             
             if name_key in name_map:
@@ -620,7 +630,7 @@ def _propagate_matches(entries: List[Dict[str, Any]]) -> int:
         names = entry.get("parsed_name", [])
         if not names: continue
         for name in names:
-            name_key = _normalize_name(name)
+            name_key = semantic_normalize(name)
             if not name_key: continue
             
             if name_key in name_map:
@@ -723,7 +733,7 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
             console.print(f"[yellow]Warning: Could not process library for matching: {e}[/yellow]")
 
     # Pre-calculate normalized names and basic data for workers to minimize overhead
-    library_series_data = [(s.name, str(s.path), _normalize_name(s.name)) for s in library_series]
+    library_series_data = [(s.name, str(s.path), semantic_normalize(s.name)) for s in library_series]
 
     # PERSISTENCE: Load existing output file to preserve matches
     existing_map = {}

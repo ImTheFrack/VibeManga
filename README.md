@@ -211,6 +211,7 @@ VibeManga includes a sophisticated parser (`matcher.py`) designed to normalize m
 ### Core Parsing Logic
 
 1.  **Normalization**:
+    *   **Semantic Normalization**: Implements a robust `semantic_normalize` utility that aggressively standardizes titles by stripping articles ("The", "A", "An", etc.), metadata tags, punctuation, and whitespace. This ensures that "The Title" and "Title, The" are treated as the same series during matching and deduplication.
     *   Unescapes HTML entities and Unicode characters.
     *   Strips metadata tags (`[...]`, `(...)`, `{...}`) and moves them to **Notes**.
     *   Strips common noise strings (e.g., "Official Comic Anthology", "Complete Edition").

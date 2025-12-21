@@ -1,3 +1,5 @@
+import os
+
 """
 Constants used throughout the VibeManga application.
 """
@@ -44,6 +46,8 @@ SCRAPER_TIMEOUT_SECONDS = 15
 QBIT_DEFAULT_TAG = "VibeManga"
 QBIT_DEFAULT_CATEGORY = "VibeManga"
 QBIT_DEFAULT_SAVEPATH = "VibeManga"
+QBIT_DOWNLOAD_ROOT = os.getenv("QBIT_DOWNLOAD_ROOT", "")
+PULL_TEMPDIR = os.getenv("PULL_TEMPDIR", "")
 
 # Nyaa.si Scraper Internals
 NYAA_DEFAULT_PAGES_TO_SCRAPE = 60

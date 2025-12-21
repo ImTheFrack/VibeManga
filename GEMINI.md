@@ -31,18 +31,17 @@ All models implement `to_dict()` and `from_dict()` for persistent storage in `vi
 ### 3. Analysis Engine (`analysis.py`)
 *   **Unit Classification**: Distinguishes between Volumes (`vXX`) and Chapters (`cXX`).
 *   **Dual Extraction**: Single files can contribute to both volume and chapter counts.
-*   **Deduplication**: Semantic masking and fuzzy matching for finding duplicates.
+*   **Semantic Normalization**: A robust `semantic_normalize` utility that aggressively strips articles ("The", "A"), tags, punctuation, and whitespace for cross-platform title matching.
+*   **Deduplication**: Uses semantic normalization and fuzzy matching for finding structural and file-level duplicates.
 *   **Utility Layer**: Consolidated `parse_size` and `format_size` functions used system-wide for consistent byte handling.
 
 ### 4. Persistence & Caching (`cache.py`)
-*   **Persistent State**: Stores the entire library hierarchy and external metadata in `vibe_manga_library.json`.
-*   **Speed Cache**: Uses `pickle` (`.vibe_manga_cache.pkl`) for high-speed access during active sessions.
-*   **Integrity**: Automatically updates the persistent state whenever changes are detected or external data is matched.
-
+...
 ### 5. Manga Matcher & Parser (`matcher.py`)
 A robust parsing engine that normalizes filenames into structured metadata.
 *   **Integration**: Results from the `match` command (like torrent magnets) are integrated directly into the `Series.external_data` field in the persistent library state.
 *   **Dual-Layer Matching**: Checks for existing matches in the output file and library before performing new matches.
+*   **Semantic Matching**: Employs `semantic_normalize` to ensure titles like "The 100 Girlfriends" correctly match library entries named "100 Girlfriends, The".
 *   **Shared Logic**: Utilizes central size parsing to enforce `UNDERSIZED` filters (Min Vol: 35MB, Min Chap: 4MB).
 
 ### 6. Grabber & qBittorrent Integration (`grabber.py`)

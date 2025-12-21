@@ -93,6 +93,15 @@
 - [ ] Code coverage reporting
 - [ ] Pre-commit hooks (black, flake8, mypy)
 
+### Refactoring
+- [ ] **Centralized Utilities**: Extract common functionality into shared utility modules to reduce duplication
+    - [ ] **Standardize Progress Bars**: Create a factory function (e.g., `create_progress_bar`) to ensure consistent visual style (spinner, bar, percentage, time remaining) across `main.py`, `matcher.py`, and `grabber.py`.
+    - [ ] **Unified JSON I/O**: Implement `load_json` and `save_json` with standardized error handling (console error printing + logging) to replace repetitive `try-except` blocks in `matcher.py`, `grabber.py`, and `main.py`.
+    - [ ] **Series Matching**: Move `find_series_match` (from `grabber.py`) and matching logic from `matcher.py` and `main.py` (show command) into a robust central search function in `analysis.py`.
+    - [ ] **Range Formatting**: Merge `vibe_format_range` (from `grabber.py`) into `analysis.format_ranges` to support optional prefixes and padding centrally.
+    - [ ] **Filename Sanitization**: Extract filename sanitization logic (e.g., replacing `|` with `｜`) from `grabber.py` into a reusable function.
+    - [ ] **Consolidation Logic**: Move `consolidate_entries` from `matcher.py` to `analysis.py` to keep all data processing logic in one place.
+
 ### Documentation
 - [x] Comprehensive README
 - [ ] API documentation (Sphinx)

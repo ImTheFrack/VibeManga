@@ -5,6 +5,10 @@ import concurrent.futures
 from pathlib import Path
 from typing import List, Optional, Tuple
 from dotenv import load_dotenv, find_dotenv
+
+# Load environment variables immediately
+load_dotenv(find_dotenv())
+
 from rich.console import Console
 from rich.tree import Tree
 from rich.table import Table
@@ -30,13 +34,13 @@ from .analysis import (
     find_structural_duplicates, 
     find_external_updates, 
     format_ranges, 
-    normalize_series_name,
+    
     classify_unit
 )
 from .cache import get_cached_library, save_library_cache, load_library_state
 from .nyaa_scraper import scrape_nyaa, get_latest_timestamp_from_nyaa
 from .matcher import process_match, consolidate_entries
-from .grabber import process_grab
+from .grabber import process_grab, process_pull
 from .constants import (
     DEFAULT_TREE_DEPTH,
     BYTES_PER_KB,
@@ -47,9 +51,6 @@ from .constants import (
     NYAA_DEFAULT_PAGES_TO_SCRAPE,
     NYAA_DEFAULT_OUTPUT_FILENAME
 )
-
-# Load environment variables
-load_dotenv(find_dotenv())
 
 # Configure logging
 logging.basicConfig(
@@ -612,13 +613,17 @@ def show(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
     found = []
     found_series_objects = []  # For deep analysis
 
-    norm_query = normalize_series_name(series_name).lower()
+    norm_query = semantic_normalize(series_name)
 
     for main_cat in library.categories:
         for sub_cat in main_cat.sub_categories:
             for series in sub_cat.series:
-                norm_series = normalize_series_name(series.name).lower()
-                if norm_query in norm_series or series_name.lower() in series.name.lower():
+                norm_series = semantic_normalize(series.name)
+                if norm_query and norm_query in norm_series:
+                    found.append((main_cat, sub_cat, series))
+                    found_series_objects.append(series)
+                elif series_name.lower() in series.name.lower():
+                    # Fallback to simple lower case substring
                     found.append((main_cat, sub_cat, series))
                     found_series_objects.append(series)
 
@@ -963,6 +968,17 @@ def grab(name: Optional[str], input_file: str, status: bool) -> None:
     """
     root_path = get_library_root()
     process_grab(name, input_file, status, root_path)
+
+@cli.command()
+@click.option("--input-file", default="nyaa_match_results.json", help="Matched results JSON to update status.")
+@click.option("--simulate", is_flag=True, help="Show what would be done without making changes.")
+@click.option("--pause", is_flag=True, help="Pause between post-processing items.")
+def pull(input_file: str, simulate: bool, pause: bool) -> None:
+    """
+    Checks for completed torrents in qBittorrent and post-processes them.
+    """
+    root_path = get_library_root()
+    process_pull(simulate=simulate, pause=pause, root_path=root_path, input_file=input_file)
 
 if __name__ == "__main__":
     cli()
