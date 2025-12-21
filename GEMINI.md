@@ -32,6 +32,7 @@ All models implement `to_dict()` and `from_dict()` for persistent storage in `vi
 *   **Unit Classification**: Distinguishes between Volumes (`vXX`) and Chapters (`cXX`).
 *   **Dual Extraction**: Single files can contribute to both volume and chapter counts.
 *   **Deduplication**: Semantic masking and fuzzy matching for finding duplicates.
+*   **Utility Layer**: Consolidated `parse_size` and `format_size` functions used system-wide for consistent byte handling.
 
 ### 4. Persistence & Caching (`cache.py`)
 *   **Persistent State**: Stores the entire library hierarchy and external metadata in `vibe_manga_library.json`.
@@ -42,6 +43,15 @@ All models implement `to_dict()` and `from_dict()` for persistent storage in `vi
 A robust parsing engine that normalizes filenames into structured metadata.
 *   **Integration**: Results from the `match` command (like torrent magnets) are integrated directly into the `Series.external_data` field in the persistent library state.
 *   **Dual-Layer Matching**: Checks for existing matches in the output file and library before performing new matches.
+*   **Shared Logic**: Utilizes central size parsing to enforce `UNDERSIZED` filters (Min Vol: 35MB, Min Chap: 4MB).
+
+### 6. Grabber & qBittorrent Integration (`grabber.py`)
+Handles the interactive selection and acquisition of manga.
+*   **Comparison Logic**: Automatically compares scraped torrent content against local library state.
+*   **New Content Detection**: Identifies specifically which volumes or chapters are missing from the local collection.
+*   **Size Heuristics**: Flags `LARGER CONTENT` (potential quality upgrade or undetected batches) and `SMALLER CONTENT` based on library-to-torrent size deltas.
+*   **Navigation**: Supports index-based navigation through consolidated manga groups.
+*   **qBit API**: Direct integration via `qbit_api.py` for headless torrent management.
 
 #### Classification Logic
 The matcher assigns a `Type` to each entry:
@@ -89,6 +99,7 @@ The logic *heavily* relies on the folder structure being `Category/SubCategory/S
 *   `dedupe [name]`: Scans for duplicate files and structural duplicates.
 *   `scrape`: Scrapes Nyaa.si for latest releases.
 *   `match`: Integrates scraped data with library metadata.
+*   `grab`: Interactively select and add torrents to qBittorrent.
 
 ## Roadmap
 See `TODO.md` for active tasks. Next big steps involve "Deep Content Analysis" (archive inspection for page counts/corruption).

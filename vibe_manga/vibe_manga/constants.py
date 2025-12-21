@@ -40,6 +40,11 @@ SCRAPER_RETRY_COUNT = 3
 SCRAPER_RETRY_BACKOFF_FACTOR = 0.5
 SCRAPER_TIMEOUT_SECONDS = 15
 
+# qBittorrent API Configuration
+QBIT_DEFAULT_TAG = "VibeManga"
+QBIT_DEFAULT_CATEGORY = "VibeManga"
+QBIT_DEFAULT_SAVEPATH = "VibeManga"
+
 # Nyaa.si Scraper Internals
 NYAA_DEFAULT_PAGES_TO_SCRAPE = 60
 NYAA_TORRENT_TABLE_SELECTOR = "div.table-responsive table.torrent-list tbody tr"

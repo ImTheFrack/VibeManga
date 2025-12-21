@@ -147,6 +147,24 @@ python -m vibe_manga.run match "Dandadan"
 
 # Show detailed table of all matches
 python -m vibe_manga.run match --table
+
+#### 3. Grab Torrents
+Interactively select and add manga torrents to qBittorrent. Features intelligent comparison between scraped releases and your local library.
+```bash
+# Interactively grab the next available manga
+python -m vibe_manga.run grab next
+
+# Search for a specific series to grab
+python -m vibe_manga.run grab "Dandadan"
+
+# Show current qBittorrent download status for VibeManga
+python -m vibe_manga.run grab --status
+```
+
+**Grabber Highlights**:
+*   **Gap Highlighting**: Clearly displays `[NEW CONTENT AVAILABLE]` with specific volume/chapter counts.
+*   **Size Heuristics**: Automatically flags `[LARGER CONTENT]` (e.g. `+2.5 GB`) or `[SMALLER CONTENT]` to help identify high-quality batches or single-chapter releases.
+*   **Smart Navigation**: Index-based group navigation with support for skipping or grabbing.
 ```
 
 ### Advanced Options
@@ -184,6 +202,7 @@ rm .vibe_manga_cache.pkl vibe_manga_library.json
 | `dedupe [query]` | Find duplicate files | `--verbose`, `--deep`, `--verify`, `--no-cache` |
 | `scrape` | Scrape latest entries from Nyaa | `--pages`, `--force`, `--summarize`, `--output` |
 | `match [query]` | Parse & categorize scraped data | `--stats`, `--table`, `--all`, `--no-parallel`, `--no-cache` |
+| `grab [name]` | Select and add torrents to qBittorrent | `--status`, `--input-file` |
 
 ## Manga Name Matching & Parsing
 
@@ -285,7 +304,12 @@ Library
 - Integrated matching: The `match` command now integrates results directly into the library state.
 - Comprehensive error handling and logging.
 
-#### 4. Cache & Persistence (`cache.py`)
+#### 4. Grabber (`grabber.py`)
+- **Interactive selection**: Refined loop for navigating manga groups.
+- **Delta Analysis**: Real-time comparison of scraped torrent metadata against local filesystem state.
+- **Heuristic Hints**: Identifies potential quality upgrades or undetected batches via size comparison.
+
+#### 5. Cache & Persistence (`cache.py`)
 - **Dual-Layer Persistence**: 
   - Fast `pickle` cache for short-term session speed.
   - Persistent JSON state (`vibe_manga_library.json`) for long-term storage of library data and external metadata.
@@ -293,17 +317,22 @@ Library
 - Configurable TTL for the speed cache (default: 50 minutes).
 - Automatic state preservation after every matching and scanning operation.
 
-#### 5. Constants (`constants.py`)
+#### 6. Constants (`constants.py`)
 - Centralized configuration and magic numbers
 - File extensions, thresholds, size calculations
 - Easy tuning without code changes
 
-## Recent Improvements (v2.0)
+## Recent Improvements (v2.1)
 
-### 🎯 Performance Enhancements
-- **Smart Caching**: Instant subsequent scans (5-min default cache TTL)
-- **Configurable Cache Control**: `--no-cache` flag on all commands
-- **Optimized Size Calculations**: Constant-based conversions (KB/MB/GB)
+### 🎯 Grab & Acquisition
+- **New Grabber Module**: Extracted high-level grab logic into `grabber.py` for better modularity.
+- **Intelligent Comparison**: The `grab` command now highlights exactly which volumes/chapters you are missing.
+- **Size Delta Hints**: Added `[LARGER CONTENT]` and `[SMALLER CONTENT]` flags with precise byte-math (MB/GB) to assist in selection.
+- **Improved Navigation**: Index-based "next" behavior ensures you never get stuck on the same group.
+
+### 📊 Code Consolidation
+- **Centralized Utilities**: Unified `parse_size` and `format_size` in `analysis.py` to eliminate duplication across scraper, matcher, and grabber.
+- **Optimized Size Calculations**: System-wide use of constant-based conversions.
 
 ### 📊 Code Quality
 - **Comprehensive Logging**: File + console logging with configurable levels

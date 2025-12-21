@@ -21,6 +21,16 @@ from rich.align import Align
 from . import constants as c
 from .scanner import scan_library
 from .models import Series, Library
+from .analysis import (
+    find_gaps, 
+    find_duplicates, 
+    find_structural_duplicates, 
+    find_external_updates, 
+    format_ranges, 
+    normalize_series_name,
+    classify_unit,
+    parse_size
+)
 from .cache import get_cached_library, save_library_cache
 
 logger = logging.getLogger(__name__)
@@ -91,32 +101,6 @@ DUAL_LANG_PATTERN = r"^([ -~]{3,})\s+([^\x00-\x7F]+.*)$"
 # Articles to move to end of title
 ARTICLE_PATTERN = r"^(The|A|An|Le|La|Les|Un|Une)\s+(.*)$"
 L_APOSTROPHE_PATTERN = r"^(L')(.+)$"
-
-def _parse_size(size_str: str) -> int:
-    if not size_str:
-        return 0
-    match = re.match(r"([\d.]+)\s*([KMGT]i?B)", size_str.strip(), re.IGNORECASE)
-    if not match:
-        return 0
-    val = float(match.group(1))
-    unit = match.group(2).upper()
-    multiplier = 1
-    if unit.startswith("K"): multiplier = 1024
-    elif unit.startswith("M"): multiplier = 1024**2
-    elif unit.startswith("G"): multiplier = 1024**3
-    elif unit.startswith("T"): multiplier = 1024**4
-    return int(val * multiplier)
-
-def _get_count(start: Optional[str], end: Optional[str]) -> int:
-    if not start:
-        return 0
-    try:
-        s = float(start)
-        e = float(end) if end else s
-        count = int(e) - int(s) + 1
-        return count if count > 0 else 0
-    except ValueError:
-        return 0
 
 def _parse_range(start: str, end: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
     if not start:
@@ -256,6 +240,14 @@ def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
 
     # 3b. Mask Protections
     part_mask_map = {}
+    
+    # Mask time-like patterns (e.g. 23:45 or 23꞉45) to prevent them from being parsed as chapters
+    time_matches = list(re.finditer(r"\b\d+[:꞉]\d+\b", clean_title))
+    for i, tm in enumerate(time_matches):
+        placeholder = f"__TIME_{i}__"
+        part_mask_map[placeholder] = tm.group(0)
+        clean_title = clean_title.replace(tm.group(0), placeholder)
+
     part_matches = list(re.finditer(r"\bPart\s+(\d+)", clean_title, re.IGNORECASE))
     for i, pm in enumerate(part_matches):
         placeholder = f"__PART_{i}__"
@@ -458,7 +450,7 @@ def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     
     # --- RULE: Size Check for Manga ---
     if item_type == "Manga":
-        size_bytes = _parse_size(size_str)
+        size_bytes = parse_size(size_str)
         vol_count = _get_count(vol_start, vol_end)
         chap_count = _get_count(chap_start, chap_end)
         
@@ -501,16 +493,18 @@ def consolidate_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     name_map = {}
     
-    # 1. Build relationships (Case Insensitive)
+    # 1. Build relationships (Ignore punctuation and case)
     for i, entry in enumerate(entries):
         names = entry.get("parsed_name", [])
         if not names: continue
         for name in names:
-            name_lower = name.lower()
-            if name_lower in name_map:
-                union(i, name_map[name_lower])
+            name_key = _normalize_name(name)
+            if not name_key: continue
+            
+            if name_key in name_map:
+                union(i, name_map[name_key])
             else:
-                name_map[name_lower] = i
+                name_map[name_key] = i
 
     # 2. Group by root
     groups = {}
@@ -621,16 +615,18 @@ def _propagate_matches(entries: List[Dict[str, Any]]) -> int:
 
     name_map = {}
     
-    # 1. Build relationships
+    # 1. Build relationships (Ignore punctuation and case)
     for i, entry in enumerate(entries):
         names = entry.get("parsed_name", [])
         if not names: continue
         for name in names:
-            name_lower = name.lower()
-            if name_lower in name_map:
-                union(i, name_map[name_lower])
+            name_key = _normalize_name(name)
+            if not name_key: continue
+            
+            if name_key in name_map:
+                union(i, name_map[name_key])
             else:
-                name_map[name_lower] = i
+                name_map[name_key] = i
 
     # 2. Gather Match Info per Group
     group_matches = {} # root_idx -> {match_data}

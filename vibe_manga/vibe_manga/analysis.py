@@ -11,7 +11,10 @@ from .constants import (
     SIMILARITY_THRESHOLD,
     MAX_RANGE_SIZE,
     YEAR_RANGE_MIN,
-    YEAR_RANGE_MAX
+    YEAR_RANGE_MAX,
+    BYTES_PER_KB,
+    BYTES_PER_MB,
+    BYTES_PER_GB
 )
 
 logger = logging.getLogger(__name__)
@@ -360,19 +363,83 @@ def find_structural_duplicates(
     return warnings
 
 def inspect_archive(file_path: Path, check_integrity: bool = False) -> Tuple[int, bool]:
+
     ext, page_count, is_corrupt = file_path.suffix.lower(), 0, False
+
     if ext == '.cbz':
+
         try:
+
             with zipfile.ZipFile(file_path, 'r') as z:
+
                 if check_integrity and z.testzip() is not None: is_corrupt = True
+
                 page_count = sum(1 for info in z.infolist() if not info.is_dir() and Path(info.filename).suffix.lower() in IMAGE_EXTENSIONS)
+
         except Exception: is_corrupt = True
+
     elif ext == '.cbr' and rarfile:
+
         try:
+
             with rarfile.RarFile(file_path, 'r') as r:
+
                 if check_integrity:
+
                     try: r.testrar()
+
                     except Exception: is_corrupt = True
+
                 page_count = sum(1 for info in r.infolist() if not info.isdir() and Path(info.filename).suffix.lower() in IMAGE_EXTENSIONS)
+
         except Exception: is_corrupt = True
+
     return page_count, is_corrupt
+
+
+
+def parse_size(size_str: str) -> int:
+
+    """Parses a size string like '1.2 GiB' or '500 MiB' into bytes."""
+
+    if not size_str:
+
+        return 0
+
+    # Match numeric part and unit (K/M/G/T)
+
+    match = re.search(r"([\d.]+)\s*([KMGT]i?B)", size_str.strip(), re.IGNORECASE)
+
+    if not match:
+
+        return 0
+
+    val = float(match.group(1))
+
+    unit = match.group(2).upper()
+
+    multiplier = 1
+
+    if unit.startswith("K"): multiplier = BYTES_PER_KB
+
+    elif unit.startswith("M"): multiplier = BYTES_PER_MB
+
+    elif unit.startswith("G"): multiplier = BYTES_PER_GB
+
+    elif unit.startswith("T"): multiplier = BYTES_PER_GB * 1024
+
+    return int(val * multiplier)
+
+
+
+def format_size(bytes_val: float) -> str:
+
+    """Formats a byte value into a human-readable string (MB or GB)."""
+
+    abs_val = abs(bytes_val)
+
+    if abs_val >= BYTES_PER_GB:
+
+        return f"{bytes_val / BYTES_PER_GB:.2f} GB"
+
+    return f"{bytes_val / BYTES_PER_MB:.2f} MB"

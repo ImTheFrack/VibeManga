@@ -4,7 +4,7 @@ import click
 import concurrent.futures
 from pathlib import Path
 from typing import List, Optional, Tuple
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from rich.console import Console
 from rich.tree import Tree
 from rich.table import Table
@@ -24,10 +24,19 @@ import json
 
 from .scanner import scan_library, enrich_series
 from .models import Library, Category, Series
-from .analysis import find_gaps, find_duplicates, find_structural_duplicates, find_external_updates, format_ranges, normalize_series_name
+from .analysis import (
+    find_gaps, 
+    find_duplicates, 
+    find_structural_duplicates, 
+    find_external_updates, 
+    format_ranges, 
+    normalize_series_name,
+    classify_unit
+)
 from .cache import get_cached_library, save_library_cache, load_library_state
 from .nyaa_scraper import scrape_nyaa, get_latest_timestamp_from_nyaa
-from .matcher import process_match
+from .matcher import process_match, consolidate_entries
+from .grabber import process_grab
 from .constants import (
     DEFAULT_TREE_DEPTH,
     BYTES_PER_KB,
@@ -40,7 +49,7 @@ from .constants import (
 )
 
 # Load environment variables
-load_dotenv()
+load_dotenv(find_dotenv())
 
 # Configure logging
 logging.basicConfig(
@@ -941,6 +950,19 @@ def match(query: Optional[str], input_file: str, output_file: str, table: bool, 
     )
     
     process_match(input_file, output_file, table, show_all, library=library, show_stats=stats, query=query, parallel=not no_parallel)
+
+@cli.command()
+@click.argument("name", required=False)
+@click.option("--input-file", default="nyaa_match_results.json", help="Matched results JSON.")
+@click.option("--status", is_flag=True, help="Show current qBittorrent downloads for VibeManga.")
+def grab(name: Optional[str], input_file: str, status: bool) -> None:
+    """
+    Selects a manga from matched results and adds it to qBittorrent.
+    
+    NAME can be a parsed name from the JSON or 'next' to get the first unflagged entry.
+    """
+    root_path = get_library_root()
+    process_grab(name, input_file, status, root_path)
 
 if __name__ == "__main__":
     cli()
