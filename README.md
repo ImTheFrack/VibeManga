@@ -34,7 +34,14 @@ VibeManga is designed to handle massive manga collections (thousands of series, 
   - Dual-layer caching: Fast `pickle` cache for instant subsequent runs and a persistent `vibe_manga_library.json` for long-term storage.
   - **Local Storage**: All metadata and caches are stored in your running directory (project root), keeping your manga library folders clean.
   - Incremental Scanning: Automatically detects filesystem changes (mtime/size) to only re-scan modified files.
+- **🤖 AI-Powered Organization**:
+  - **Smart Categorization**: Uses LLMs (via OpenRouter or Ollama) to suggest the best library location for new series.
+  - **Consensus Logic**: Orchestrates multiple AI roles (Moderator, Librarian, Analyst) to reach a binding decision.
+- **📚 Metadata Enrichment**:
+  - Fetches rich details (synopsis, authors, genres, status) from MyAnimeList (Jikan) with AI fallback.
+  - Saves a persistent `series.json` in each folder for lightning-fast local lookup.
 - **🔗 External Data Integration**: Integrates metadata from external sources (like Nyaa torrent links) directly into your library's persistent state.
+- **🛡️ Filesystem Safety**: Automatic sanitization of illegal characters for cross-platform (Windows/Linux) compatibility.
 - **📝 Comprehensive Logging**: Detailed logging to file and console for debugging and monitoring
 
 ### 🎯 Key Capabilities
@@ -117,6 +124,14 @@ python -m vibe_manga.run stats "Action" --continuity
 # Find duplicates
 python -m vibe_manga.run dedupe
 python -m vibe_manga.run dedupe "Naruto"
+
+# Fetch metadata for series (saves to series.json)
+python -m vibe_manga.run metadata "One Piece"
+python -m vibe_manga.run metadata --all
+
+# Automatically categorize new series using AI
+python -m vibe_manga.run categorize
+python -m vibe_manga.run categorize --auto
 ```
 
 ### Scraping & Matching (New)
@@ -203,6 +218,8 @@ rm .vibe_manga_cache.pkl vibe_manga_library.json
 | `scrape` | Scrape latest entries from Nyaa | `--pages`, `--force`, `--summarize`, `--output` |
 | `match [query]` | Parse & categorize scraped data | `--stats`, `--table`, `--all`, `--no-parallel`, `--no-cache` |
 | `grab [name]` | Select and add torrents to qBittorrent | `--status`, `--input-file` |
+| `metadata [query]` | Fetch and save JSON metadata | `--all`, `--force-update` |
+| `categorize [query]`| Sort series into categories using AI | `--auto`, `--no-cache` |
 
 ## Manga Name Matching & Parsing
 

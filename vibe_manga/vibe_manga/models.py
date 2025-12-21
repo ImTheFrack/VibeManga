@@ -85,6 +85,8 @@ class Series:
     sub_groups: List[SubGroup] = field(default_factory=list)
     # External data (e.g. from Nyaa or other sources)
     external_data: Dict[str, Any] = field(default_factory=dict)
+    # Metadata (e.g. from MAL/Jikan/AI via series.json)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def total_volume_count(self) -> int:
@@ -110,7 +112,8 @@ class Series:
             "path": str(self.path),
             "volumes": [v.to_dict() for v in self.volumes],
             "sub_groups": [sg.to_dict() for sg in self.sub_groups],
-            "external_data": self.external_data
+            "external_data": self.external_data,
+            "metadata": self.metadata
         }
 
     @classmethod
@@ -120,7 +123,8 @@ class Series:
             path=Path(data["path"]),
             volumes=[Volume.from_dict(v) for v in data.get("volumes", [])],
             sub_groups=[SubGroup.from_dict(sg) for sg in data.get("sub_groups", [])],
-            external_data=data.get("external_data", {})
+            external_data=data.get("external_data", {}),
+            metadata=data.get("metadata", {})
         )
 
 @dataclass

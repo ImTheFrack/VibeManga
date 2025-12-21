@@ -175,6 +175,14 @@ def match_single_entry(entry: Dict[str, Any], library_series_data: List[Tuple[st
             # SequenceMatcher can be slow, but this is now running in parallel
             ratio = difflib.SequenceMatcher(None, norm_name, s_norm).ratio() * 100
             if ratio > best_ratio:
+                # Enforce number consistency for high-confidence fuzzy matches
+                # This prevents "Part 1" matching "Part 2" or "Series 2021" matching "Series"
+                if ratio >= c.FUZZY_MATCH_THRESHOLD:
+                    nums_a = [int(n) for n in re.findall(r'\d+', norm_name)]
+                    nums_b = [int(n) for n in re.findall(r'\d+', s_norm)]
+                    if nums_a != nums_b:
+                        continue
+
                 best_ratio = ratio
                 if ratio >= c.FUZZY_MATCH_THRESHOLD:
                     best_match = (s_name, s_path)

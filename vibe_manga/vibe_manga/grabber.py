@@ -41,7 +41,8 @@ from .analysis import (
     classify_unit,
     format_ranges,
     parse_size,
-    format_size
+    format_size,
+    sanitize_filename
 )
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,13 @@ def find_series_match(torrent_name: str, library: Optional[Any] = None) -> Optio
                 # 2. Fuzzy Match
                 ratio = difflib.SequenceMatcher(None, norm_t_name, norm_s_name).ratio() * 100
                 if ratio > best_ratio:
+                    # Enforce number consistency for high-confidence fuzzy matches
+                    if ratio >= FUZZY_MATCH_THRESHOLD:
+                        nums_a = [int(n) for n in re.findall(r'\d+', norm_t_name)]
+                        nums_b = [int(n) for n in re.findall(r'\d+', norm_s_name)]
+                        if nums_a != nums_b:
+                            continue
+
                     best_ratio = ratio
                     if ratio >= FUZZY_MATCH_THRESHOLD:
                         best_match = s
@@ -369,6 +377,10 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
             l_c_set = set(l_c_nums)
             
             for f in group_files:
+                # Skip already processed files from content analysis
+                if f.get("grab_status") in ["grabbed", "skipped", "pulled"]:
+                    continue
+
                 t_bytes = parse_size(f.get("size"))
                 if t_bytes > max_torrent_bytes:
                     max_torrent_bytes = t_bytes
@@ -399,9 +411,10 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
 
             # Auto-skip if no new content
             if not new_v and not new_c:
-                console.print(f"[dim]Auto-skipping Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (No new content)[/dim]")
+                console.print(f"[dim]Auto-skipping Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (No new content or already processed)[/dim]")
                 for f in group_files:
-                    f["grab_status"] = "skipped"
+                    if not f.get("grab_status"):
+                        f["grab_status"] = "skipped"
                 
                 try:
                     with open(input_file, 'w', encoding='utf-8') as f:
@@ -433,6 +446,9 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
             added_via_completed = False
 
             for f in sorted_group_files:
+                if f.get("grab_status") in ["grabbed", "skipped", "pulled"]:
+                    continue
+
                 v_nums, _, _ = classify_unit(f.get("name", ""))
                 
                 # Criterion 1: New Volumes
@@ -544,14 +560,15 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
         
         console.print(table)
         
-        choice = click.prompt("Enter ID to grab, 's' to skip group, 'n' to next group, or 'q' to quit", default="n")
+        choice = click.prompt("Enter ID(s) to grab (e.g. 1,2,3 or 'all'), 's' to skip, 'n' to next, or 'q' to quit", default="n")
+        choice_clean = choice.lower().strip()
         
-        if choice.lower() == 'q':
+        if choice_clean == 'q':
             break
-        elif choice.lower() == 'n':
+        elif choice_clean == 'n':
             current_idx += 1
             continue
-        elif choice.lower() == 's':
+        elif choice_clean == 's':
             # Flag all in group as skipped
             for f in group_files:
                 f["grab_status"] = "skipped"
@@ -566,30 +583,55 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
             
             current_idx += 1
             continue
-        elif choice.isdigit():
-            idx = int(choice) - 1
-            if 0 <= idx < len(group_files):
-                selected = group_files[idx]
-                magnet = selected.get("magnet_link")
-                if not magnet:
-                    console.print("[red]No magnet link found for this entry.[/red]")
-                else:
+            
+        # Parse IDs
+        selected_indices = []
+        if choice_clean == 'all':
+            selected_indices = list(range(len(group_files)))
+        else:
+            # Handle both single digits and comma-separated
+            parts = choice_clean.split(",")
+            for p in parts:
+                p = p.strip()
+                if p.isdigit():
+                    selected_indices.append(int(p) - 1)
+        
+        if selected_indices:
+            added_any = False
+            for idx in selected_indices:
+                if 0 <= idx < len(group_files):
+                    selected = group_files[idx]
+                    
+                    # Skip if already grabbed
+                    if selected.get("grab_status") == "grabbed":
+                        console.print(f"[dim]ID {idx+1} already grabbed, skipping.[/dim]")
+                        continue
+
+                    magnet = selected.get("magnet_link")
+                    if not magnet:
+                        console.print(f"[red]No magnet link found for ID {idx+1}.[/red]")
+                        continue
+                    
                     if qbit.add_torrent([magnet], tag=QBIT_DEFAULT_TAG, savepath=QBIT_DEFAULT_SAVEPATH):
                         console.print(f"[bold green]Successfully added to qBittorrent: {selected.get('name')}[/bold green]")
                         selected["grab_status"] = "grabbed"
-                        
-                        # Save updated data
-                        try:
-                            with open(input_file, 'w', encoding='utf-8') as f:
-                                json.dump(data, f, indent=2)
-                        except Exception as e:
-                            console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
-                        
-                        current_idx += 1
+                        added_any = True
                     else:
-                        console.print("[red]Failed to add torrent to qBittorrent.[/red]")
-            else:
-                console.print("[red]Invalid ID.[/red]")
+                        console.print(f"[red]Failed to add torrent ID {idx+1} to qBittorrent.[/red]")
+                else:
+                    console.print(f"[red]Invalid ID: {idx+1}[/red]")
+            
+            if added_any:
+                # Save updated data
+                try:
+                    with open(input_file, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, indent=2)
+                except Exception as e:
+                    console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
+                
+                current_idx += 1
+        else:
+            console.print("[red]Invalid input. Use IDs (e.g. 1,2), 'all', 's', 'n', or 'q'.[/red]")
 
     if current_idx >= len(manga_groups):
         console.print("[green]Reached the end of the match list.[/green]")
@@ -814,13 +856,7 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
         # Extract the plain series name from the matched/parsed name.
         series_name = re.sub(r"\[.*?\]", "", display_name).strip()
         series_name = re.sub(r"^\d+\.\s+", "", series_name)
-        
-        # Sanitize for filesystem (especially for Windows where | : ? * are illegal)
-        # We replace them with full-width equivalents that are legal and look similar.
-        replacements = {"|": "｜", ":": "：", "?": "？", "*": "＊", "<": "＜", ">": "＞", "\"": "＂", "/": "／", "\\": "＼"}
-        for char, rep in replacements.items():
-            series_name = series_name.replace(char, rep)
-        series_name = series_name.strip(" .")
+        series_name = sanitize_filename(series_name)
         
         action_msg = f"[4/8] Normalizing filenames for: {series_name}"
         if simulate:

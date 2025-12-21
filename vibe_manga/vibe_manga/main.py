@@ -34,13 +34,16 @@ from .analysis import (
     find_structural_duplicates, 
     find_external_updates, 
     format_ranges, 
-    
-    classify_unit
+    semantic_normalize,
+    classify_unit,
+    sanitize_filename
 )
+from .metadata import get_or_create_metadata
 from .cache import get_cached_library, save_library_cache, load_library_state
 from .nyaa_scraper import scrape_nyaa, get_latest_timestamp_from_nyaa
 from .matcher import process_match, consolidate_entries
 from .grabber import process_grab, process_pull
+from .categorizer import suggest_category
 from .constants import (
     DEFAULT_TREE_DEPTH,
     BYTES_PER_KB,
@@ -49,21 +52,174 @@ from .constants import (
     PROGRESS_REFRESH_RATE,
     DEEP_ANALYSIS_REFRESH_RATE,
     NYAA_DEFAULT_PAGES_TO_SCRAPE,
-    NYAA_DEFAULT_OUTPUT_FILENAME
+    NYAA_DEFAULT_OUTPUT_FILENAME,
+    ROLE_CONFIG
 )
+from .ai_api import get_available_models
+from .config import load_ai_config, save_ai_config, get_role_config
 
 # Configure logging
-logging.basicConfig(
-    level=logging.ERROR,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('vibe_manga.log'),
-        logging.StreamHandler()
-    ]
-)
+log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+# File Handler (Full Detail)
+file_handler = logging.FileHandler('vibe_manga.log')
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(log_formatter)
+
+# Stream Handler (Console - Errors and Warnings)
+stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.WARNING)
+stream_handler.setFormatter(log_formatter)
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+# Clear existing handlers to avoid duplicates
+root_logger.handlers = []
+root_logger.addHandler(file_handler)
+root_logger.addHandler(stream_handler)
+
 logger = logging.getLogger(__name__)
 
 console = Console()
+
+def select_model_interactive(models: List[str], default: Optional[str] = None) -> str:
+    """
+    Interactive paginated selector for large model lists.
+    """
+    # Create a local copy to filter
+    all_models = sorted(models)
+    display_pool = all_models
+    filter_query = ""
+    page_size = 15
+    current_page = 0
+    
+    while True:
+        total_pages = max(1, (len(display_pool) + page_size - 1) // page_size)
+        if current_page >= total_pages: current_page = 0
+        if current_page < 0: current_page = total_pages - 1
+        
+        # Get page slice
+        start_idx = current_page * page_size
+        end_idx = start_idx + page_size
+        page_items = display_pool[start_idx:end_idx]
+        
+        # Render
+        console.print("") # Spacer
+        table = Table(
+            title=f"Select Model (Page {current_page + 1}/{total_pages})", 
+            box=box.ROUNDED,
+            caption=f"[dim]Total: {len(display_pool)} models | Filter: '{filter_query}'[/dim]"
+        )
+        table.add_column("ID", justify="right", style="cyan", width=4)
+        table.add_column("Model Name", style="white")
+        
+        for i, model in enumerate(page_items):
+            # ID corresponds to the index in the CURRENT filtered list (1-based)
+            display_idx = start_idx + i + 1
+            marker = " [green](Current)[/green]" if model == default else ""
+            table.add_row(str(display_idx), f"{model}{marker}")
+            
+        console.print(table)
+        
+        # Prompt
+        options = []
+        if total_pages > 1: options.extend(["[n]ext", "[p]rev"])
+        options.extend(["[f]ilter", "[c]lear filter", "or Enter ID"])
+        
+        prompt_text = ", ".join(options)
+        val = click.prompt(prompt_text, default="n" if total_pages > 1 else "")
+        val_clean = val.lower().strip()
+        
+        # Navigation
+        if val_clean == 'n':
+            current_page += 1
+        elif val_clean == 'p':
+            current_page -= 1
+        elif val_clean == 'f':
+            filter_query = click.prompt("Enter filter text", default="")
+            display_pool = [m for m in all_models if filter_query.lower() in m.lower()]
+            current_page = 0
+        elif val_clean == 'c':
+            filter_query = ""
+            display_pool = all_models
+            current_page = 0
+        elif val_clean.isdigit():
+            # Selection by ID
+            sel_idx = int(val_clean) - 1
+            if 0 <= sel_idx < len(display_pool):
+                return display_pool[sel_idx]
+            else:
+                console.print(f"[red]Invalid ID: {val_clean}. Must be between 1 and {len(display_pool)}[/red]")
+                click.pause()
+        else:
+            # Manual entry or exact match
+            if val in all_models:
+                return val
+            if click.confirm(f"Use manual model name '{val}'?"):
+                return val
+
+def run_model_assignment() -> None:
+    """
+    Interactive wizard to assign AI models to specific roles.
+    Saves choices to vibe_manga_ai_config.json.
+    """
+    console.print(Rule("[bold magenta]AI Model Assignment Wizard[/bold magenta]"))
+    
+    # Fetch available models
+    with console.status("[bold blue]Fetching available models..."):
+        remote_models = get_available_models("remote")
+        local_models = get_available_models("local")
+    
+    console.print(f"[green]Found {len(remote_models)} Remote models and {len(local_models)} Local models.[/green]")
+    if not remote_models:
+        console.print("[dim]Note: Remote discovery returned 0 models. Check your API key or Base URL.[/dim]")
+    if not local_models:
+        console.print("[dim]Note: Local discovery returned 0 models. If using Open WebUI (port 3000), ensure you have an API Key set in .env[/dim]")
+    console.print("")
+    
+    current_config = load_ai_config()
+    role_settings = current_config.get("roles", {})
+    
+    for role_name in ROLE_CONFIG.keys():
+        console.print(Panel(f"[bold cyan]Configuring Role: {role_name}[/bold cyan]"))
+        
+        # Determine current setting
+        defaults = ROLE_CONFIG[role_name]
+        current = role_settings.get(role_name, {})
+        curr_prov = current.get("provider", defaults["provider"])
+        curr_mod = current.get("model", defaults["model"])
+        
+        console.print(f"Current: [yellow]{curr_prov}[/yellow] / [yellow]{curr_mod}[/yellow]")
+        
+        if not click.confirm(f"Change model for {role_name}?", default=False):
+            continue
+            
+        # Select Provider
+        prov_choice = click.prompt(
+            "Select Provider", 
+            type=click.Choice(["remote", "local"], case_sensitive=False),
+            default=curr_prov
+        )
+        
+        # Select Model
+        available = remote_models if prov_choice == "remote" else local_models
+        
+        if not available:
+            console.print(f"[red]No models found for {prov_choice}. Using manual entry.[/red]")
+            mod_choice = click.prompt("Enter Model Name", default=curr_mod)
+        else:
+            mod_choice = select_model_interactive(available, default=curr_mod)
+        
+        role_settings[role_name] = {
+            "provider": prov_choice,
+            "model": mod_choice
+        }
+        console.print(f"[green]✓ Set {role_name} to {prov_choice} / {mod_choice}[/green]\n")
+
+    # Save
+    current_config["roles"] = role_settings
+    save_ai_config(current_config)
+    console.print("[bold green]Configuration saved successfully![/bold green]")
 
 def get_library_root() -> str:
     """
@@ -250,6 +406,216 @@ def perform_deep_analysis(
 def cli():
     """VibeManga: A CLI for managing your manga collection."""
     pass
+
+@cli.command()
+@click.argument("query", required=False)
+@click.option("--force-update", is_flag=True, help="Force re-download of metadata from Jikan/AI.")
+@click.option("--trust", "trust_jikan", is_flag=True, help="Trust Jikan if name is perfect match (skips AI Supervisor).")
+@click.option("--all", "process_all", is_flag=True, help="Process all series in the library.")
+@click.option("--model-assign", is_flag=True, help="Configure AI models for specific roles before running.")
+def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, process_all: bool, model_assign: bool) -> None:
+    """
+    Fetches and saves metadata (genres, authors, status) for series.
+    Creates a 'series.json' file in each series directory.
+    """
+    if model_assign:
+        run_model_assignment()
+        if not query and not process_all:
+             return
+
+    logger.info(f"Metadata command started (query={query}, force={force_update}, all={process_all}, trust={trust_jikan})")
+    
+    if not query and not process_all:
+        console.print("[yellow]Please provide a series name query or use --all to process the entire library.[/yellow]")
+        return
+
+    root_path = get_library_root()
+    library = run_scan_with_progress(
+        root_path,
+        "[bold green]Scanning Library for Metadata...",
+        use_cache=True # Metadata doesn't need fresh file scan usually
+    )
+
+    # Filter Targets
+    targets = []
+    
+    def collect_targets(cat):
+        for s in cat.series:
+            if process_all or (query and query.lower() in s.name.lower()):
+                targets.append(s)
+        for sub in cat.sub_categories:
+            collect_targets(sub)
+
+    for main in library.categories:
+        collect_targets(main)
+
+    if not targets:
+        console.print(f"[red]No series found matching '{query or 'ALL'}'[/red]")
+        return
+
+    console.print(f"[cyan]Found {len(targets)} series to process...[/cyan]")
+    
+    table = Table(title="Updated Metadata", box=box.ROUNDED)
+    table.add_column("Series", style="white bold")
+    table.add_column("Status", justify="center")
+    table.add_column("Source", justify="center", style="dim")
+    table.add_column("Genres/Tags", style="dim")
+    table.add_column("Authors", style="cyan")
+
+    from .ai_api import tracker
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("[dim]{task.fields[status]}[/dim]"),
+        console=console
+    ) as progress:
+        task = progress.add_task("[green]Processing metadata...", total=len(targets), status="Ready")
+        
+        for series in targets:
+            progress.update(task, description=f"[green]Fetching: {series.name}[/green]", status="Calling API...")
+            try:
+                # Callback or status update could happen here if we passed a function
+                # For now, we update status based on the synchronous call's return
+                meta, source = get_or_create_metadata(series.path, series.name, force_update=force_update, trust_jikan=trust_jikan)
+                
+                # Update status with source
+                color = "green" if "Trusted" in source or "Local" in source else "cyan" if "Jikan" in source else "magenta"
+                progress.update(task, status=f"[{color}]{source}[/{color}]")
+
+                # Add to summary table (limit rows if too many)
+                if len(targets) <= 20 or force_update:
+                    genres = ", ".join((meta.genres or [])[:3])
+                    authors = ", ".join((meta.authors or [])[:2])
+                    status_color = "green" if meta.status == "Completed" else "yellow"
+                    table.add_row(
+                        series.name,
+                        f"[{status_color}]{meta.status}[/{status_color}]",
+                        source,
+                        genres,
+                        authors
+                    )
+            except Exception as e:
+                logger.error(f"Error fetching metadata for {series.name}: {e}")
+                progress.update(task, status="[red]Error[/red]")
+            
+            progress.advance(task)
+
+    if table.row_count > 0:
+        console.print(table)
+    
+    # Final AI Report
+    usage = tracker.get_summary()
+    if usage:
+        console.print("")
+        report = Table(title="AI Usage Summary", box=box.SIMPLE_HEAD)
+        report.add_column("Model", style="cyan")
+        report.add_column("Input Tokens", justify="right")
+        report.add_column("Output Tokens", justify="right")
+        report.add_column("Total", justify="right", style="bold white")
+        
+        for model, counts in usage.items():
+            report.add_row(
+                model,
+                str(counts["prompt"]),
+                str(counts["completion"]),
+                str(counts["prompt"] + counts["completion"])
+            )
+        console.print(report)
+
+    console.print(f"[green]Metadata update complete for {len(targets)} series![/green]")
+
+@cli.command()
+@click.argument("query", required=False)
+@click.option("--auto", is_flag=True, help="Automatically move folders without asking.")
+@click.option("--no-cache", is_flag=True, help="Force fresh scan.")
+@click.option("--model-assign", is_flag=True, help="Configure AI models for specific roles before running.")
+def categorize(query: Optional[str], auto: bool, no_cache: bool, model_assign: bool) -> None:
+    """
+    Automatically sorts series from 'Uncategorized' folders into the main library using AI.
+    """
+    if model_assign:
+        run_model_assignment()
+        # Categorize can run without query, so we don't necessarily return
+        # But if no query/auto is provided, default categorize behavior is to scan anyway.
+        
+    logger.info(f"Categorize command started (query={query}, auto={auto}, no_cache={no_cache})")
+    root_path = get_library_root()
+    library = run_scan_with_progress(
+        root_path,
+        "[bold green]Scanning for Uncategorized Series...",
+        use_cache=not no_cache
+    )
+
+    # 1. Find Uncategorized Series
+    uncategorized_series: List[Tuple[Category, Category, Series]] = []
+    
+    for main in library.categories:
+        if main.name == "Uncategorized":
+            for sub in main.sub_categories:
+                for s in sub.series:
+                    if not query or query.lower() in s.name.lower():
+                        uncategorized_series.append((main, sub, s))
+        else:
+             for sub in main.sub_categories:
+                 if sub.name.startswith("Pulled-"):
+                      for s in sub.series:
+                          if not query or query.lower() in s.name.lower():
+                               uncategorized_series.append((main, sub, s))
+
+    if not uncategorized_series:
+        console.print("[yellow]No series found in 'Uncategorized' or 'Pulled-*' folders.[/yellow]")
+        return
+
+    console.print(f"[cyan]Found {len(uncategorized_series)} series to categorize...[/cyan]")
+
+    for main, sub, series in uncategorized_series:
+        console.print(Rule(f"[bold blue]Categorizing: {series.name}[/bold blue]"))
+        console.print(f"[dim]Current Location: {main.name} > {sub.name}[/dim]")
+        
+        try:
+            results = suggest_category(series, library)
+            if not results or not results.get("consensus"):
+                console.print(f"[red]Failed to get AI consensus for {series.name}. Skipping.[/red]")
+                continue
+                
+            consensus = results["consensus"]
+            final_cat = sanitize_filename(consensus.get("final_category", "Manga"))
+            final_sub = sanitize_filename(consensus.get("final_sub_category", "Other"))
+            reason = consensus.get("reason", "No reason provided.")
+            conf = consensus.get("confidence_score", 0.0)
+            
+            console.print(f"  [bold]AI Suggestion:[/bold] [green]{final_cat} / {final_sub}[/green] (Confidence: {conf:.2f})")
+            console.print(f"  [bold]Reason:[/bold] {reason}")
+            
+            # Moderation warning
+            mod = results.get("moderation", {})
+            if mod.get("classification") != "SAFE":
+                console.print(f"  [bold red]MODERATION WARNING:[/bold red] {mod.get('classification')} - {mod.get('reason')}")
+
+            if not auto:
+                if not click.confirm("Move this series?"):
+                    console.print("[yellow]Skipped.[/yellow]")
+                    continue
+
+            # Perform Move
+            target_dir = Path(root_path) / final_cat / final_sub / series.name
+            if target_dir.exists():
+                console.print(f"[red]Error: Target directory already exists: {target_dir}[/red]")
+                continue
+                
+            console.print(f"[dim]Moving to: {target_dir}[/dim]")
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            series.path.rename(target_dir)
+            console.print("[green]✓ Move successful.[/green]")
+            
+        except Exception as e:
+            logger.error(f"Error during categorization of {series.name}: {e}", exc_info=True)
+            console.print(f"[red]Error: {e}[/red]")
+
+    console.print(Rule("[bold magenta]Categorization Complete[/bold magenta]"))
 
 @cli.command()
 @click.argument("query", required=False)

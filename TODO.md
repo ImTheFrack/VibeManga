@@ -84,6 +84,42 @@
     - Mobile-friendly responsive design
     - Online reader integration
 
+### 7. Metadata Management
+- [x] **Enrichment Command (`metadata`)**:
+    -   **Goal**: Create a local, persistent knowledge base for every series to minimize API usage and enable advanced analysis.
+    -   **Action**: Fetch detailed info via Jikan (MAL), AniList, or AI (fallback) and save to `series.json` in the series folder.
+    -   **Schema**: Title, Alt Titles, Authors, Synopsis, Genres, Tags, Demographics, Status (Completed, Ongoing, Hiatus, Cancelled), Total Volumes/Chapters, Release Year, MAL/AniList IDs.
+-   **Integration Benefits**:
+    -   **Smart Categorization**: Uses cached genres/tags for instant, deterministic sorting without external calls.
+    -   **Advanced Stats**: Enables breakdown by Demographics (Seinen vs Shonen), Genre distribution, or Publication Status.
+    -   **Gap Detection**: Compare local file counts against "Official Total Chapters" to detect incomplete series even if no numbers are skipped.
+    -   **Rich Display**: The `show` command will display synopses, ratings, and authors.
+
+### 8. AI Integration & Automation
+- [x] **Infrastructure & Configuration**:
+    - **Backends**: Support **OpenRouter** (remote) and **Ollama** (local) via OpenAI-compatible APIs.
+    - **Config**: Store keys/URLs in `.env`, expose via `constants.py`.
+    - **Roles & Models**: Define distinct system prompts (Roles) in `constants.py` (e.g., `ROLE_LIBRARIAN`, `ROLE_MODERATOR`). Allow per-call selection of Model and Role.
+    - **Validation**: Strict parsing of AI outputs (JSON/Structured) to ensure validity before acting.
+- [x] **Content Safety & Filtering (Critical)**:
+    - **Adult Classification**: Distinguish between "Mature" (Gore, Ecchi, Dark Themes) and "Adult" (Pornography/Hentai) based on American sensibilities.
+        - *Rule*: Explicit sexual content -> Move to `Adult` category.
+    - **Illegal/Harmful Content**:
+        - *Rule*: Flag CP, Hateful, or Illegal content for **immediate deletion**.
+- [x] **Smart Categorization (`categorize`)**:
+    - **Goal**: Automatically sort series from "Uncategorized/Pulled-*" folders into the main library.
+    - **Strategy**:
+        1. **Metadata Acquisition**: Read local `series.json` (from `metadata` command) or fetch via APIs if missing.
+        2. **Contextual Analysis**: 
+            - Scan existing library for related series (prequels/sequels).
+            - Analyze current folder structure to learn user's taxonomy.
+        3. **Sensible Taxonomy**: Avoid lazy tags (e.g., "Isekai" overload). Create balanced, meaningful categories.
+        4. **AI Consensus**: Use LLMs to propose the best `Category/SubCategory` path.
+    - **Features**:
+        - Dry-run mode with `rich` tables showing confidence scores.
+        - Interactive confirmation before moving files.
+- [ ] **Library Rebalancing (`--rebalance`)**:
+
 ## Technical Improvements
 
 ### Code Quality
@@ -99,7 +135,7 @@
     - [ ] **Unified JSON I/O**: Implement `load_json` and `save_json` with standardized error handling (console error printing + logging) to replace repetitive `try-except` blocks in `matcher.py`, `grabber.py`, and `main.py`.
     - [ ] **Series Matching**: Move `find_series_match` (from `grabber.py`) and matching logic from `matcher.py` and `main.py` (show command) into a robust central search function in `analysis.py`.
     - [ ] **Range Formatting**: Merge `vibe_format_range` (from `grabber.py`) into `analysis.format_ranges` to support optional prefixes and padding centrally.
-    - [ ] **Filename Sanitization**: Extract filename sanitization logic (e.g., replacing `|` with `｜`) from `grabber.py` into a reusable function.
+    - [x] **Filename Sanitization**: Extract filename sanitization logic (e.g., replacing `|` with `｜`) from `grabber.py` into a reusable function.
     - [ ] **Consolidation Logic**: Move `consolidate_entries` from `matcher.py` to `analysis.py` to keep all data processing logic in one place.
 
 ### Documentation
@@ -118,24 +154,16 @@
 
 ## Version History
 
-### v3.0 (Current)
+### v4.0 (Recent)
+- AI Integration (Remote/Local backends)
+- Smart Categorization command
+- Metadata Enrichment command
+- Filename Sanitization utility
+
+### v3.0
 - Grabbing functionality
 - Pulling functionality
 - Parallelization of matching
- 
-### v2.0 (Last)
-- Smart caching with TTL
-- Comprehensive logging system
-- Full type hints coverage
-- Constants extraction
-- Performance optimizations
-
-### v1.0 (Initial Release)
-- Core scanning functionality
-- Stats, tree, show, dedupe, scrape, match commands
-- Archive inspection and verification
-- Gap detection algorithm
-- Duplicate finder with fuzzy matching
 
 ## Contributing
 

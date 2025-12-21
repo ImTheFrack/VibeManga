@@ -88,6 +88,11 @@ NOISE_PATTERNS = [
     re.compile(r'\b(?:Bonus|Extra|Omake)\s*(?:Chapter|Ch|c|\x23)?\s*\d+', re.IGNORECASE), # Bonus Chapter 11
     re.compile(r'\d+%', re.IGNORECASE),                  # Percentages: 100%
     re.compile(r'\d+\s*[:꞉：]\s*\d+', re.IGNORECASE),    # Time-like patterns: 23:45, 10:00 (Standard, Modifier, Fullwidth)
+    re.compile(r'\bNo\.\s*\d+', re.IGNORECASE),          # No. 8, No. 6
+    re.compile(r'\bRanma\s*1\s*2\b', re.IGNORECASE),    # Special case for Ranma 1 2
+    re.compile(r'\b5-toubun\b', re.IGNORECASE),          # 5-toubun no Hanayome
+    re.compile(r'\b20th\s*Century\s*Boys\b', re.IGNORECASE),
+    re.compile(r'\b21st\s*Century\s*Boys\b', re.IGNORECASE),
 ]
 
 def _parse_regex_matches(matches: List[Tuple]) -> List[float]:
@@ -200,6 +205,26 @@ def normalize_series_name(name: str) -> str:
         return f"{match.group(2)}, {match.group(1)}"
     return name
 
+def sanitize_filename(name: str) -> str:
+    """
+    Sanitizes a string for use as a directory or filename.
+    Replaces illegal characters (| : ? * < > " / \\) with full-width equivalents.
+    """
+    if not name:
+        return "Unknown"
+    
+    replacements = {
+        "|": "｜", ":": "：", "?": "？", "*": "＊", 
+        "<": "＜", ">": "＞", "\"": "＂", "/": "／", "\\": "＼"
+    }
+    
+    sanitized = name
+    for char, rep in replacements.items():
+        sanitized = sanitized.replace(char, rep)
+        
+    # Trim dots and spaces from ends (especially trailing dots cause issues on Windows)
+    return sanitized.strip(" .")
+
 def semantic_normalize(name: str) -> str:
     """
     Highly aggressive normalization for semantic matching.
@@ -210,6 +235,16 @@ def semantic_normalize(name: str) -> str:
     name = re.sub(r"\[.*?\]|\(.*?\)|\{.*?\}", " ", name)
     # 2. Strip articles
     name = re.sub(r"\b(The|A|An|Le|La|Les|Un|Une)\b", " ", name, flags=re.IGNORECASE)
+    
+    # 2b. Expand common symbols to alphanumeric equivalents
+    name = name.replace("½", "1 2")
+    name = name.replace("⅓", "1 3")
+    name = name.replace("¼", "1 4")
+    # Handle '&' (often 'and' or 'to')
+    # If it's Yotsuba&! -> Yotsubato
+    name = re.sub(r"(?<=\w)&(?!\w|\s)", "to", name)
+    name = name.replace("&", " and ")
+
     # 3. Strip non-alphanumeric
     name = re.sub(r"[^a-zA-Z0-9]", "", name)
     # 4. Lowercase
