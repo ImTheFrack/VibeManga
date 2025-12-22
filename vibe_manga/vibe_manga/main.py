@@ -3,7 +3,8 @@ import logging
 import click
 import concurrent.futures
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
+from collections import Counter
 from dotenv import load_dotenv, find_dotenv
 
 # Load environment variables immediately
@@ -40,12 +41,12 @@ from .analysis import (
     classify_unit,
     sanitize_filename
 )
-from .metadata import get_or_create_metadata
+from .metadata import get_or_create_metadata, load_local_metadata
 from .cache import get_cached_library, save_library_cache, load_library_state
 from .nyaa_scraper import scrape_nyaa, get_latest_timestamp_from_nyaa
 from .matcher import process_match, consolidate_entries
 from .grabber import process_grab, process_pull
-from .categorizer import suggest_category
+from .categorizer import suggest_category, get_category_list
 from .constants import (
     DEFAULT_TREE_DEPTH,
     BYTES_PER_KB,
@@ -55,7 +56,10 @@ from .constants import (
     DEEP_ANALYSIS_REFRESH_RATE,
     NYAA_DEFAULT_PAGES_TO_SCRAPE,
     NYAA_DEFAULT_OUTPUT_FILENAME,
-    ROLE_CONFIG
+    ROLE_CONFIG,
+    VALID_DEMOGRAPHICS,
+    CLEAN_WORD_RE,
+    STOP_WORDS
 )
 from .ai_api import get_available_models
 from .config import load_ai_config, save_ai_config, get_role_config
@@ -404,6 +408,64 @@ def perform_deep_analysis(
 
     logger.info(f"Deep analysis complete: {completed} series processed")
 
+def select_category_manual(library: Library) -> Tuple[str, str]:
+    """Interactive selector for manual categorization."""
+    categories = get_category_list(library)
+    categories.sort()
+    
+    console.print("\n[bold cyan]Available Categories:[/bold cyan]")
+    
+    current_page = 0
+    page_size = 20
+    display_pool = categories
+    
+    while True:
+        total_pages = max(1, (len(display_pool) + page_size - 1) // page_size)
+        if current_page >= total_pages: current_page = 0
+        if current_page < 0: current_page = total_pages - 1
+        
+        start_idx = current_page * page_size
+        end_idx = start_idx + page_size
+        page_items = display_pool[start_idx:end_idx]
+        
+        table = Table(title=f"Select Category (Page {current_page+1}/{total_pages})", box=box.SIMPLE)
+        table.add_column("ID", justify="right", style="cyan", width=4)
+        table.add_column("Category/Sub", style="white")
+        
+        for i, cat in enumerate(page_items):
+            display_idx = start_idx + i + 1
+            table.add_row(str(display_idx), cat)
+            
+        console.print(table)
+        console.print("[dim]Options: [n]ext, [p]rev, [f]ilter, [c]lear filter, [m]anual entry, or Enter ID[/dim]")
+        
+        val = click.prompt("Selection", default="n" if total_pages > 1 else "").lower().strip()
+        
+        if val == 'n': current_page += 1
+        elif val == 'p': current_page -= 1
+        elif val == 'f':
+            filter_query = click.prompt("Filter", default="")
+            display_pool = [c for c in categories if filter_query.lower() in c.lower()]
+            current_page = 0
+        elif val == 'c':
+            filter_query = ""
+            display_pool = categories
+            current_page = 0
+        elif val == 'm':
+            # Fully manual entry
+            raw = click.prompt("Enter Category/SubCategory (e.g. Manga/Action)")
+            parts = raw.split('/')
+            if len(parts) >= 2:
+                return parts[0].strip(), parts[1].strip()
+            else:
+                return raw.strip(), "Other"
+        elif val.isdigit():
+            idx = int(val) - 1
+            if 0 <= idx < len(display_pool):
+                selected = display_pool[idx]
+                parts = selected.split('/')
+                return parts[0], parts[1]
+
 @click.group()
 def cli():
     """VibeManga: A CLI for managing your manga collection."""
@@ -551,12 +613,84 @@ def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, proces
 
     console.print(f"[green]Metadata update complete for {len(targets)} series![/green]")
 
+def manual_select_category(library: Library) -> Optional[Tuple[str, str]]:
+    """Interactive manual category selection helper."""
+    console.print(Rule("[bold cyan]Manual Categorization[/bold cyan]"))
+    
+    # 1. Main Category
+    mains = [c for c in library.categories if c.name != "Uncategorized"]
+    
+    table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE)
+    table.add_column("Key", style="cyan", width=4)
+    table.add_column("Category Name")
+    
+    opts = {}
+    for i, cat in enumerate(mains, 1):
+        opts[str(i)] = cat
+        table.add_row(str(i), cat.name)
+    
+    table.add_row("n", "[italic]New Category...[/italic]")
+    table.add_row("c", "[italic]Cancel[/italic]")
+    
+    console.print(table)
+    choice = click.prompt("Select Main Category", default="c").lower().strip()
+    
+    selected_main = None
+    selected_main_name = ""
+    
+    if choice == 'n':
+        selected_main_name = click.prompt("Enter NEW Main Category Name")
+    elif choice == 'c':
+        return None
+    elif choice in opts:
+        selected_main = opts[choice]
+        selected_main_name = selected_main.name
+    else:
+        console.print("[red]Invalid selection.[/red]")
+        return None
+
+    # 2. Sub Category
+    subs = []
+    if selected_main:
+        subs = selected_main.sub_categories
+    
+    console.print(f"\n[bold cyan]Sub-Categories for '{selected_main_name}'[/bold cyan]")
+    table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE)
+    table.add_column("Key", style="cyan", width=4)
+    table.add_column("Sub-Category Name")
+    
+    sub_opts = {}
+    for i, sub in enumerate(subs, 1):
+        sub_opts[str(i)] = sub
+        table.add_row(str(i), sub.name)
+        
+    table.add_row("n", "[italic]New Sub-Category...[/italic]")
+    table.add_row("b", "[italic]Back / Cancel[/italic]")
+    
+    console.print(table)
+    sub_choice = click.prompt("Select Sub-Category", default="n").lower().strip()
+    
+    selected_sub_name = ""
+    if sub_choice == 'n':
+        selected_sub_name = click.prompt("Enter NEW Sub-Category Name")
+    elif sub_choice == 'b':
+        return None
+    elif sub_choice in sub_opts:
+        selected_sub_name = sub_opts[sub_choice].name
+    else:
+        console.print("[red]Invalid selection.[/red]")
+        return None
+        
+    return selected_main_name, selected_sub_name
+
 @cli.command()
 @click.argument("query", required=False)
 @click.option("--auto", is_flag=True, help="Automatically move folders without asking.")
+@click.option("--simulate", is_flag=True, help="Dry run: show where folders would be moved without moving them.")
 @click.option("--no-cache", is_flag=True, help="Force fresh scan.")
 @click.option("--model-assign", is_flag=True, help="Configure AI models for specific roles before running.")
-def categorize(query: Optional[str], auto: bool, no_cache: bool, model_assign: bool) -> None:
+@click.option("--pause", is_flag=True, help="Pause before each categorization decision.")
+def categorize(query: Optional[str], auto: bool, simulate: bool, no_cache: bool, model_assign: bool, pause: bool) -> None:
     """
     Automatically sorts series from 'Uncategorized' folders into the main library using AI.
     """
@@ -565,7 +699,7 @@ def categorize(query: Optional[str], auto: bool, no_cache: bool, model_assign: b
         # Categorize can run without query, so we don't necessarily return
         # But if no query/auto is provided, default categorize behavior is to scan anyway.
         
-    logger.info(f"Categorize command started (query={query}, auto={auto}, no_cache={no_cache})")
+    logger.info(f"Categorize command started (query={query}, auto={auto}, simulate={simulate}, no_cache={no_cache}, pause={pause})")
     root_path = get_library_root()
     library = run_scan_with_progress(
         root_path,
@@ -594,50 +728,198 @@ def categorize(query: Optional[str], auto: bool, no_cache: bool, model_assign: b
         return
 
     console.print(f"[cyan]Found {len(uncategorized_series)} series to categorize...[/cyan]")
+    if simulate:
+        console.print("[bold yellow][SIMULATION MODE] No folders will be moved.[/bold yellow]\n")
 
+    import shutil
     for main, sub, series in uncategorized_series:
         console.print(Rule(f"[bold blue]Categorizing: {series.name}[/bold blue]"))
         console.print(f"[dim]Current Location: {main.name} > {sub.name}[/dim]")
         
-        try:
-            results = suggest_category(series, library)
-            if not results or not results.get("consensus"):
-                console.print(f"[red]Failed to get AI consensus for {series.name}. Skipping.[/red]")
+        user_feedback = None
+        should_move = False
+        final_cat_path = None
+        
+        results = None # Result cache
+        
+        while True: # Interactive Loop for this series
+            try:
+                if not results:
+                    results = suggest_category(series, library, user_feedback=user_feedback)
+                    if not results or not results.get("consensus"):
+                        console.print(f"[red]Failed to get AI consensus for {series.name}. Skipping.[/red]")
+                        break # Skip this series
+                    
+                consensus = results["consensus"]
+                final_cat = sanitize_filename(consensus.get("final_category", "Manga"))
+                final_sub = sanitize_filename(consensus.get("final_sub_category", "Other"))
+                reason = consensus.get("reason", "No reason provided.")
+                conf = consensus.get("confidence_score", 0.0)
+                
+                # Moderation Check
+                mod = results.get("moderation", {})
+                is_flagged = mod.get("classification") != "SAFE"
+                
+                # Auto-Delete on Mod Flag (Handle before menu loop)
+                if is_flagged and auto:
+                    console.print(f"[bold red]AUTO-MODE: Moderation flag detected. DELETING {series.name}...[/bold red]")
+                    if not simulate:
+                        try:
+                            shutil.rmtree(series.path)
+                            console.print("[red]Series deleted.[/red]")
+                        except Exception as e:
+                            console.print(f"[red]Failed to delete: {e}[/red]")
+                    else:
+                        console.print("[yellow][SIMULATE] Would DELETE series.[/yellow]")
+                    break # Done with this series
+                
+                # Auto-Move (if no flag)
+                if auto:
+                    final_cat_path = Path(root_path) / final_cat / final_sub / series.name
+                    should_move = True
+                    break
+
+                # Inner Menu Loop (Display & Choice)
+                action_taken = False
+                while True:
+                    # Display Metadata for Context
+                    meta_obj = results.get("metadata")
+                    if meta_obj:
+                        console.print(Rule("[bold]Series Metadata[/bold]"))
+                        
+                        # Tags/Genres Row
+                        tag_text = ""
+                        if meta_obj.genres:
+                            tag_text += f"[bold blue]Genres:[/bold blue] {', '.join(meta_obj.genres)}  "
+                        if meta_obj.demographics:
+                            tag_text += f"[bold magenta]Demographics:[/bold magenta] {', '.join(meta_obj.demographics)}  "
+                        if meta_obj.tags:
+                            # Show only first 5 tags to avoid clutter
+                            shown_tags = meta_obj.tags[:5]
+                            more_tags = len(meta_obj.tags) - 5
+                            tag_str = ', '.join(shown_tags)
+                            if more_tags > 0:
+                                tag_str += f" (+{more_tags} more)"
+                            tag_text += f"[bold cyan]Themes:[/bold cyan] {tag_str}"
+                        
+                        if tag_text:
+                            console.print(Padding(tag_text, (0, 2)))
+                            
+                        # Synopsis (Truncated)
+                        if meta_obj.synopsis:
+                            syn = meta_obj.synopsis
+                            if len(syn) > 300:
+                                syn = syn[:297] + "..."
+                            console.print(Padding(f"[italic]{syn}[/italic]", (1, 2)))
+                            
+                    console.print(Rule("[bold]AI Suggestion[/bold]"))
+                    console.print(f"  [bold]Target:[/bold] [green]{final_cat} / {final_sub}[/green] (Confidence: {conf:.2f})")
+                    console.print(f"  [bold]Reason:[/bold] {reason}")
+                    
+                    if is_flagged:
+                        console.print(f"  [bold red]MODERATION WARNING:[/bold red] {mod.get('classification')} - {mod.get('reason')}")
+
+                    # Improved Menu with Table
+                    console.print("\n[bold]Options:[/bold]")
+                    menu_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
+                    menu_table.add_column("Key", style="bold cyan")
+                    menu_table.add_column("Action")
+                    menu_table.add_column("Description", style="dim")
+                    
+                    menu_table.add_row(r"\[a]", "Accept", "Move to suggestion")
+                    menu_table.add_row(r"\[b]", "Reject", "Retry with instruction")
+                    menu_table.add_row(r"\[c]", "Blacklist", "Delete Series")
+                    menu_table.add_row(r"\[d]", "Info", "Show full AI analysis")
+                    menu_table.add_row(r"\[e]", "Manual", "Select category manually")
+                    menu_table.add_row(r"\[s]", "Skip", "Skip this series")
+                    menu_table.add_row(r"\[q]", "Quit", "Exit program")
+                    console.print(menu_table)
+                    
+                    choice = click.prompt("Select action", default="a", show_default=True).lower().strip()
+                    
+                    if choice == 'a': # Accept
+                        final_cat_path = Path(root_path) / final_cat / final_sub / series.name
+                        should_move = True
+                        action_taken = True
+                        break
+                        
+                    elif choice == 'b': # Reject
+                        fb = click.prompt("Enter instruction for AI (e.g., 'It's actually a Shoujo')")
+                        if is_flagged:
+                            fb += " (Override moderation constraints)"
+                        user_feedback = fb
+                        console.print("[yellow]Retrying with feedback...[/yellow]")
+                        results = None # Force re-fetch
+                        action_taken = False # Break inner, loop outer
+                        break
+                        
+                    elif choice == 'c': # Blacklist / Delete
+                        if click.confirm(f"Are you sure you want to PERMANENTLY DELETE '{series.name}'?", default=False):
+                            if not simulate:
+                                try:
+                                    shutil.rmtree(series.path)
+                                    console.print("[red]Series deleted.[/red]")
+                                except Exception as e:
+                                    console.print(f"[red]Failed to delete: {e}[/red]")
+                            else:
+                                console.print("[yellow][SIMULATE] Would DELETE series.[/yellow]")
+                            action_taken = True
+                            break # Done with this series
+                        else:
+                            continue # Re-loop inner menu
+                            
+                    elif choice == 'd': # Info
+                        console.print(Rule("[bold]AI Analysis Details[/bold]"))
+                        console.print(Panel(json.dumps(mod, indent=2), title="Moderator", border_style="red" if is_flagged else "green"))
+                        console.print(Panel(json.dumps(results.get("practical"), indent=2), title="Practical", border_style="blue"))
+                        console.print(Panel(json.dumps(results.get("creative"), indent=2), title="Creative", border_style="magenta"))
+                        console.print(Panel(json.dumps(consensus, indent=2), title="Consensus", border_style="yellow"))
+                        click.pause()
+                        continue # Re-loop inner menu (results valid)
+                        
+                    elif choice == 'e': # Manual
+                        manual = manual_select_category(library)
+                        if manual:
+                             m_cat, m_sub = manual
+                             final_cat_path = Path(root_path) / m_cat / m_sub / series.name
+                             should_move = True
+                             action_taken = True
+                             break
+                        else:
+                             continue # Re-loop inner
+                        
+                    elif choice == 's': # Skip
+                        console.print("[yellow]Skipped.[/yellow]")
+                        action_taken = True
+                        break
+                        
+                    elif choice == 'q': # Quit
+                        console.print("[yellow]Quitting...[/yellow]")
+                        return
+
+                if action_taken:
+                    break
+                # If not action_taken, we loop outer (re-fetching AI if results=None)
+
+            except Exception as e:
+                logger.error(f"Error during categorization of {series.name}: {e}", exc_info=True)
+                console.print(f"[red]Error: {e}[/red]")
+                break
+
+        # Perform Move if accepted
+        if should_move and final_cat_path:
+            if simulate:
+                console.print(f"[yellow][SIMULATE][/yellow] Would move to: [dim]{final_cat_path}[/dim]")
+                continue
+
+            if final_cat_path.exists():
+                console.print(f"[red]Error: Target directory already exists: {final_cat_path}[/red]")
                 continue
                 
-            consensus = results["consensus"]
-            final_cat = sanitize_filename(consensus.get("final_category", "Manga"))
-            final_sub = sanitize_filename(consensus.get("final_sub_category", "Other"))
-            reason = consensus.get("reason", "No reason provided.")
-            conf = consensus.get("confidence_score", 0.0)
-            
-            console.print(f"  [bold]AI Suggestion:[/bold] [green]{final_cat} / {final_sub}[/green] (Confidence: {conf:.2f})")
-            console.print(f"  [bold]Reason:[/bold] {reason}")
-            
-            # Moderation warning
-            mod = results.get("moderation", {})
-            if mod.get("classification") != "SAFE":
-                console.print(f"  [bold red]MODERATION WARNING:[/bold red] {mod.get('classification')} - {mod.get('reason')}")
-
-            if not auto:
-                if not click.confirm("Move this series?"):
-                    console.print("[yellow]Skipped.[/yellow]")
-                    continue
-
-            # Perform Move
-            target_dir = Path(root_path) / final_cat / final_sub / series.name
-            if target_dir.exists():
-                console.print(f"[red]Error: Target directory already exists: {target_dir}[/red]")
-                continue
-                
-            console.print(f"[dim]Moving to: {target_dir}[/dim]")
-            target_dir.parent.mkdir(parents=True, exist_ok=True)
-            series.path.rename(target_dir)
+            console.print(f"[dim]Moving to: {final_cat_path}[/dim]")
+            final_cat_path.parent.mkdir(parents=True, exist_ok=True)
+            series.path.rename(final_cat_path)
             console.print("[green]✓ Move successful.[/green]")
-            
-        except Exception as e:
-            logger.error(f"Error during categorization of {series.name}: {e}", exc_info=True)
-            console.print(f"[red]Error: {e}[/red]")
 
     console.print(Rule("[bold magenta]Categorization Complete[/bold magenta]"))
 
@@ -647,13 +929,14 @@ def categorize(query: Optional[str], auto: bool, no_cache: bool, model_assign: b
 @click.option("--deep", is_flag=True, help="Perform deep analysis (page counts).")
 @click.option("--verify", is_flag=True, help="Verify archive integrity (slow).")
 @click.option("--no-cache", is_flag=True, help="Force fresh scan, ignore cache.")
-def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_cache: bool) -> None:
+@click.option("--no-metadata", is_flag=True, help="Suppress metadata insights from series.json.")
+def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_cache: bool, no_metadata: bool) -> None:
     """
     Show statistics.
     If QUERY is provided, shows stats for the matching Category, Sub-Category, or Series.
     The highest-level match takes precedence (Main > Sub > Series).
     """
-    logger.info(f"Stats command started (query={query}, continuity={continuity}, deep={deep}, verify={verify}, no_cache={no_cache})")
+    logger.info(f"Stats command started (query={query}, continuity={continuity}, deep={deep}, verify={verify}, no_cache={no_cache}, no_meta={no_metadata})")
     root_path = get_library_root()
     library = run_scan_with_progress(
         root_path,
@@ -712,11 +995,23 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
     # 3. Aggregation
     total_series = 0
     total_volumes = 0
+    total_chapters = 0
+    total_units = 0
     total_size = 0
     total_pages = 0
     complete_series = 0
     
-    # Helper to count complete series
+    # Metadata Aggregators
+    genres_counter = Counter()
+    authors_counter = Counter()
+    status_counter = Counter()
+    tags_counter = Counter()
+    demographics_counter = Counter()
+    years_counter = Counter()
+    synopsis_words_counter = Counter()
+    metadata_count = 0
+
+    # Helper to count complete series and collect metadata
     def get_all_series(t_list, t_type):
         all_s = []
         for t in t_list:
@@ -733,29 +1028,60 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
                 all_s.append(t)
         return all_s
 
+    all_target_series = get_all_series(targets, target_type)
+
     if continuity:
         with console.status("[bold blue]Checking continuity..."):
-            all_target_series = get_all_series(targets, target_type)
             for s in all_target_series:
                 if not find_gaps(s):
                     complete_series += 1
 
-    for t in targets:
-        if target_type == "Library":
-            total_series += t.total_series
-            total_volumes += t.total_volumes
-            total_size += t.total_size_bytes
-            total_pages += t.total_pages
-        elif target_type == "Series":
-            total_series += 1
-            total_volumes += t.total_volume_count
-            total_size += t.total_size_bytes
-            total_pages += t.total_page_count
-        else: # Categories
-            total_series += t.total_series_count
-            total_volumes += t.total_volume_count
-            total_size += t.total_size_bytes
-            total_pages += t.total_page_count
+    if not no_metadata:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console
+        ) as progress:
+            task = progress.add_task("[bold blue]Aggregating metadata insights...", total=len(all_target_series))
+            for s in all_target_series:
+                meta = load_local_metadata(s.path)
+                if meta:
+                    metadata_count += 1
+                    for g in meta.genres: genres_counter[g] += 1
+                    for a in meta.authors: authors_counter[a] += 1
+                    for t in meta.tags: tags_counter[t] += 1
+                    for d in meta.demographics: 
+                        if d in VALID_DEMOGRAPHICS:
+                            # Standardize Shonen
+                            label = "Shonen" if d == "Shounen" else d
+                            demographics_counter[label] += 1
+                    if meta.release_year: years_counter[meta.release_year] += 1
+                    if meta.status: status_counter[meta.status] += 1
+                    
+                    if meta.synopsis:
+                        # Simple word tokenization and cleaning
+                        words = meta.synopsis.lower().split()
+                        for w in words:
+                            cleaned = CLEAN_WORD_RE.sub('', w)
+                            if cleaned and len(cleaned) > 2 and cleaned not in STOP_WORDS:
+                                synopsis_words_counter[cleaned] += 1
+                progress.advance(task)
+
+    from .analysis import classify_unit
+    for t in all_target_series:
+        total_series += 1
+        total_volumes += t.total_volume_count
+        total_size += t.total_size_bytes
+        total_pages += t.total_page_count
+        
+        # Aggregate chapters and units
+        all_vols = t.volumes + [v for sg in t.sub_groups for v in sg.volumes]
+        for v in all_vols:
+            v_nums, c_nums, u_nums = classify_unit(v.name)
+            if c_nums: total_chapters += len(c_nums)
+            if u_nums: total_units += len(u_nums)
 
     total_gb = total_size / BYTES_PER_GB
     logger.info(f"Stats aggregated: {total_series} series, {total_volumes} volumes, {total_gb:.2f} GB")
@@ -791,6 +1117,9 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
         cards.append(make_stat_panel(str(total_series), "Total Series", "cyan"))
         
     cards.append(make_stat_panel(str(total_volumes), "Total Volumes", "green"))
+    cards.append(make_stat_panel(f"{total_chapters:,}", "Total Chapters", "magenta"))
+    cards.append(make_stat_panel(str(total_units), "Total Units", "dim"))
+
     if deep:
         cards.append(make_stat_panel(f"{total_pages:,}", "Total Pages", "blue"))
     cards.append(make_stat_panel(f"{total_gb:.2f} GB", "Total Size", "yellow"))
@@ -806,10 +1135,100 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
         color = "green" if percent == 100 else "yellow" if percent > 80 else "red"
         cards.append(make_stat_panel(f"{percent:.1f}%", "Continuity", color))
 
-    console.print(Columns(cards))
+    # Cards removed from here, will be printed next to Breakdown Table
     console.print("")
 
-    # 5. Breakdown Table
+        # Metadata Insights Section
+    if not no_metadata and metadata_count > 0:
+        console.print(Rule("[bold cyan]Metadata Insights[/bold cyan]", style="dim cyan"))
+        
+        from rich.bar import Bar
+
+        # Manual mapping for much darker versions of standard colors to ensure 
+        # strong visual contrast for bar segregation.
+        DIM_MAP = {
+            "cyan": "#004d4d",    # Dark Cyan
+            "magenta": "#4d004d", # Dark Magenta
+            "yellow": "#4d4d00",  # Dark Yellow
+            "blue": "#00004d",    # Dark Blue
+            "green": "#003300",   # Dark Green
+            "white": "#444444"    # Dark Gray
+        }
+
+        def make_insight_table(title: str, counter: Counter, label: str, color: str, limit: int = 10, offset: int = 0):
+            # Header and Columns use the theme color consistently
+            t = Table(title=title, box=box.SIMPLE, header_style=f"bold {color}", expand=True)
+            t.add_column(label, ratio=3, style=f"bold {color}")
+            t.add_column("Count", justify="right", style=color, ratio=1)
+            t.add_column("Dist.", ratio=3) 
+            
+            # Get all common items and slice
+            all_items = counter.most_common(offset + limit)
+            items = all_items[offset:offset + limit]
+            
+            max_val = max(counter.values()) if counter else 1
+            dim_color = DIM_MAP.get(color, color)
+
+            for i, (name, count) in enumerate(items):
+                # Alternate bar color for segregation, but keep text color stable
+                bar_color = color if i % 2 == 0 else dim_color
+                t.add_row(
+                    str(name), 
+                    str(count), 
+                    Bar(max_val, 0, count, color=bar_color)
+                )
+            return t
+
+        # Group as requested: Genres/Authors, Status/Demographics, Tags 1-10/Tags 11-20
+        insight_tables = [
+            make_insight_table("Top Genres", genres_counter, "Genre", "cyan"),
+            make_insight_table("Top Authors", authors_counter, "Author", "magenta"),
+            make_insight_table("Status Dist.", status_counter, "Status", "yellow"),
+            make_insight_table("Demographics", demographics_counter, "Type", "blue"),
+            make_insight_table("Top Tags (1-10)", tags_counter, "Tag", "green"),
+            make_insight_table("Top Tags (11-20)", tags_counter, "Tag", "green", offset=10)
+        ]
+
+        # Print in pairs (2 columns per row) using a container table to force 2-column layout
+        container = Table.grid(expand=True)
+        container.add_column(ratio=1)
+        container.add_column(ratio=1)
+
+        for i in range(0, len(insight_tables), 2):
+            pair = insight_tables[i:i+2]
+            if len(pair) == 2:
+                container.add_row(pair[0], pair[1])
+            else:
+                container.add_row(pair[0], "")
+            container.add_row("", "") # Spacer row
+
+        console.print(container)
+
+        # Row 3: Synopsis Keyword Analysis
+        if synopsis_words_counter:
+            top_words = synopsis_words_counter.most_common(50)
+            word_columns = []
+            
+            # Use 5 columns for the top 50 keywords
+            num_cols = 5
+            per_col = (len(top_words) + num_cols - 1) // num_cols
+            
+            for i in range(0, len(top_words), per_col):
+                chunk = top_words[i:i+per_col]
+                t = Table(box=None, show_header=False)
+                t.add_column("W", style="italic white")
+                t.add_column("C", style="dim", justify="right")
+                for w, c in chunk:
+                    t.add_row(w, str(c))
+                word_columns.append(t)
+            
+            console.print(Panel(
+                Columns(word_columns, padding=(0, 2), expand=True), 
+                title="[bold]Top 50 Narrative Keywords[/bold]", 
+                border_style="dim"
+            ))
+
+    # 5. Breakdown Table & Side Cards
     table_title = f"Breakdown ({target_type})"
     t = Table(title=table_title, box=box.SIMPLE_HEAD, show_lines=False, header_style="bold cyan")
     
@@ -938,7 +1357,32 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
                      row.append(f"{vol_mb:.2f}")
                      t.add_row(*row)
 
-    console.print(t)
+    # Reorganize cards into a 3x2 (or similar) grid for the side panel
+    card_grid = Table.grid(padding=(0, 1))
+    card_grid.add_column(ratio=1)
+    card_grid.add_column(ratio=1)
+    
+    # Fill grid rows (2 panels per row)
+    for i in range(0, len(cards), 2):
+        row_items = cards[i:i+2]
+        if len(row_items) == 2:
+            card_grid.add_row(row_items[0], row_items[1])
+        else:
+            card_grid.add_row(row_items[0], "")
+
+    # Side panel content (Grid + Footnote)
+    side_content = [card_grid]
+    if not no_metadata and metadata_count > 0:
+        side_content.append(Text("")) # Spacer
+        side_content.append(Align(f"[dim]Insights: {metadata_count}/{total_series} series with series.json[/dim]", align="right"))
+
+    # Final side-by-side layout: [Breakdown Table] [Card Grid + Footnote]
+    final_layout = Table.grid(expand=True, padding=(0, 2))
+    final_layout.add_column(ratio=3) # Table gets more space
+    final_layout.add_column(ratio=2) # Cards get enough space for 2-column grid
+    final_layout.add_row(t, Group(*side_content))
+
+    console.print(final_layout)
 
 @cli.command()
 @click.option("--depth", default=DEFAULT_TREE_DEPTH, help="How deep to show the tree (1=Main, 2=Sub, 3=Series, 4=SubGroups).")
@@ -990,9 +1434,10 @@ def tree(depth: int, deep: bool, verify: bool, no_cache: bool) -> None:
 @click.option("--deep", is_flag=True, help="Perform deep analysis (page counts).")
 @click.option("--verify", is_flag=True, help="Verify archive integrity (slow).")
 @click.option("--no-cache", is_flag=True, help="Force fresh scan, ignore cache.")
-def show(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: bool) -> None:
+@click.option("--no-metadata", is_flag=True, help="Suppress display of metadata from series.json.")
+def show(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: bool, no_metadata: bool) -> None:
     """Finds a specific series and shows its details, including gaps and updates."""
-    logger.info(f"Show command started (series_name={series_name}, showfiles={showfiles}, deep={deep}, verify={verify}, no_cache={no_cache})")
+    logger.info(f"Show command started (series_name={series_name}, showfiles={showfiles}, deep={deep}, verify={verify}, no_cache={no_cache}, no_meta={no_metadata})")
     root_path = get_library_root()
     library = run_scan_with_progress(
         root_path,
@@ -1032,10 +1477,54 @@ def show(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
         if i > 0:
             console.print("")
 
-        console.print(Panel(f"[bold]Result: {series.name}[/bold]", expand=False, border_style="cyan"))
+        # Attempt to load metadata
+        meta = None
+        if not no_metadata:
+            meta = load_local_metadata(series.path)
+
+        title_text = f"[bold]Result: {series.name}[/bold]"
+        if meta and meta.title != "Unknown" and meta.title.lower() != series.name.lower():
+            title_text += f" [dim]({meta.title})[/dim]"
+
+        console.print(Panel(title_text, expand=False, border_style="cyan"))
         
         content_elements = []
 
+        # Metadata Summary (Top Panel)
+        if meta:
+            meta_table = Table.grid(padding=(0, 2))
+            meta_table.add_column(style="bold cyan")
+            meta_table.add_column()
+            
+            if meta.authors:
+                meta_table.add_row("Authors:", ", ".join(meta.authors))
+            if meta.release_year:
+                meta_table.add_row("Year:", str(meta.release_year))
+            if meta.status:
+                status_color = "green" if meta.status == "Completed" else "yellow"
+                meta_table.add_row("Status:", f"[{status_color}]{meta.status}[/{status_color}]")
+            if meta.genres:
+                meta_table.add_row("Genres:", ", ".join(meta.genres[:5]))
+            
+            # External Links
+            links = []
+            if meta.mal_id: links.append(f"[blue][link=https://myanimelist.net/manga/{meta.mal_id}]MAL[/link][/blue]")
+            if meta.anilist_id: links.append(f"[blue][link=https://anilist.co/manga/{meta.anilist_id}]AniList[/link][/blue]")
+            if links:
+                meta_table.add_row("Links:", " | ".join(links))
+
+            content_elements.append(meta_table)
+            
+            if meta.synopsis:
+                # Truncate synopsis if it's too long
+                syn = meta.synopsis
+                if len(syn) > 400:
+                    syn = syn[:397] + "..."
+                content_elements.append(Padding(Text(syn, style="dim italic", justify="left"), (1, 0, 1, 0)))
+            
+            content_elements.append(Rule(style="dim"))
+
+        # Technical Details Table
         table = Table(box=box.ROUNDED)
         table.add_column("Property", style="cyan")
         table.add_column("Value", style="white")
@@ -1351,14 +1840,16 @@ def match(query: Optional[str], input_file: str, output_file: str, table: bool, 
 @click.option("--input-file", default="nyaa_match_results.json", help="Matched results JSON.")
 @click.option("--status", is_flag=True, help="Show current qBittorrent downloads for VibeManga.")
 @click.option("--auto-add", is_flag=True, help="Automatically add torrents if they contain new volumes.")
-def grab(name: Optional[str], input_file: str, status: bool, auto_add: bool) -> None:
+@click.option("--auto-add-only", is_flag=True, help="Same as auto-add, but skips items that don't match criteria instead of prompting.")
+@click.option("--max", "max_downloads", type=int, help="Limit the number of auto-added items.")
+def grab(name: Optional[str], input_file: str, status: bool, auto_add: bool, auto_add_only: bool, max_downloads: Optional[int]) -> None:
     """
     Selects a manga from matched results and adds it to qBittorrent.
     
     NAME can be a parsed name from the JSON or 'next' to get the first unflagged entry.
     """
     root_path = get_library_root()
-    process_grab(name, input_file, status, root_path, auto_add=auto_add)
+    process_grab(name, input_file, status, root_path, auto_add=auto_add, auto_add_only=auto_add_only, max_downloads=max_downloads)
 
 @cli.command()
 @click.option("--input-file", default="nyaa_match_results.json", help="Matched results JSON to update status.")

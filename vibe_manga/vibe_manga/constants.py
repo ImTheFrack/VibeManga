@@ -1,4 +1,5 @@
 import os
+import re
 
 """
 Constants used throughout the VibeManga application.
@@ -7,6 +8,57 @@ Constants used throughout the VibeManga application.
 # File Extensions
 VALID_MANGA_EXTENSIONS = {'.cbz', '.cbr', '.zip', '.rar', '.pdf', '.epub'}
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.avif'}
+
+# Analysis & Metadata
+VALID_DEMOGRAPHICS = {'Shounen', 'Seinen', 'Shoujo', 'Josei', 'Shonen'}
+CLEAN_WORD_RE = re.compile(r'[^a-z]')
+
+# Common English stop words for synopsis analysis
+STOP_WORDS = {
+    # Articles & Conjunctions
+    'the', 'and', 'to', 'of', 'in', 'is', 'it', 'with', 'for', 'that', 'as', 'on', 'was', 'at', 'by',
+    'an', 'be', 'this', 'which', 'from', 'but', 'not', 'or', 'nor', 'yet', 'so', 'if', 'than', 'then',
+    'although', 'because', 'since', 'unless', 'until', 'while', 'whether', 'though',
+    # Pronouns
+    'his', 'her', 'their', 'they', 'she', 'he', 'him', 'them', 'its', 'their', 'theirs', 'himself',
+    'herself', 'themselves', 'itself', 'myself', 'yourself', 'ourselves', 'yourselves', 'mine', 'yours',
+    'ours', 'who', 'whom', 'whose', 'which', 'what', 'whatever', 'whichever', 'whoever', 'whomever',
+    'this', 'that', 'these', 'those', 'each', 'every', 'any', 'all', 'both', 'few', 'many', 'most',
+    'other', 'another', 'some', 'such', 'neither', 'either', 'someone', 'anyone', 'everyone', 'nobody',
+    'no', 'yes', 'own', 'me', 'us', 'you', 'my', 'our', 'your', 'hes', 'hers',
+    # Prepositions & Adverbs
+    'about', 'above', 'across', 'after', 'against', 'along', 'amid', 'among', 'around', 'at', 'before',
+    'behind', 'below', 'beneath', 'beside', 'besides', 'between', 'beyond', 'by', 'down', 'during',
+    'except', 'from', 'inside', 'into', 'like', 'near', 'off', 'onto', 'out', 'outside', 'over', 'past',
+    'since', 'through', 'throughout', 'till', 'toward', 'towards', 'under', 'underneath', 'until', 'up',
+    'upon', 'within', 'without', 'very', 'now', 'there', 'where', 'when', 'how', 'always', 'never',
+    'often', 'sometimes', 'usually', 'already', 'still', 'just', 'even', 'also', 'only', 'well',
+    'almost', 'enough', 'quite', 'rather', 'too', 'fairly', 'nearly', 'again', 'further', 'once',
+    'here', 'why', 'somewhere', 'anywhere', 'everywhere', 'nowhere'
+    # Verbs (Auxiliary/Common)
+    'am', 'are', 'was', 'were', 'been', 'being', 'have', 'has', 'had', 'having', 'do', 'does', 'did',
+    'doing', 'can', 'could', 'will', 'would', 'shall', 'should', 'may', 'might', 'must', 'get', 'got',
+    'go', 'goes', 'went', 'gone', 'come', 'comes', 'came', 'become', 'becomes', 'became', 'find',
+    'finds', 'found', 'take', 'takes', 'took', 'taken', 'make', 'makes', 'made', 'see', 'sees', 'saw',
+    'seen', 'know', 'knows', 'knew', 'known', 'think', 'thinks', 'thought', 'want', 'wants', 'wanted',
+    'look', 'looks', 'looked', 'use', 'uses', 'used', 'give', 'gives', 'gave', 'given', 'keep', 'keeps',
+    # Numbers & Ordinals
+    'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven',
+    'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty',
+    'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety', 'hundred', 'thousand', 'million',
+    'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth',
+    # Meta/Manga Specific Noise
+    'source', 'mal', 'written', 'rewrite', 'synopsis', 'background', 'manga', 'series', 'chapter',
+    'volume', 'publication', 'publishing', 'published', 'author', 'artist', 'illustration', 'illustrated',
+    'serialized', 'magazine', 'adapted', 'adaptation', 'anime', 'tv', 'movie', 'film', 'theatrical',
+    'version', 'complete', 'edition', 'special', 'additional', 'includes', 'including', 'containing',
+    'however', 'story', 'world', 'life', 'years', 'man', 'time', 'day', 'new', 'way', 'back', 'around',
+    # Custom
+    'more','despite','begins','shes','hes', 'usa','ever,','soon','away','named','begins','begin',
+    'kodansha','girls','girl','boys','boy', 'womens','women','women','called','men','man','mens',
+    'suddenly','long','short','meets','meet','decides','next','finally','final','eventually',
+    'something','everything','everything','anything','nothing'
+}
 
 # Analysis Thresholds
 SIMILARITY_THRESHOLD = 0.95  # Threshold for fuzzy matching duplicate detection
@@ -62,137 +114,100 @@ NYAA_COL_IDX_LEECHERS = 6
 NYAA_COL_IDX_COMPLETED = 7
 
 # AI Configuration
-# Remote
+# Remote (Default settings for the provider)
 REMOTE_AI_BASE_URL = os.getenv("REMOTE_AI_BASE_URL", "https://openrouter.ai/api/v1")
 REMOTE_AI_API_KEY = os.getenv("REMOTE_AI_API_KEY", "")
-REMOTE_AI_MODEL = os.getenv("REMOTE_AI_MODEL", "anthropic/claude-3-haiku")
+REMOTE_AI_MODEL = os.getenv("REMOTE_AI_MODEL", "google/gemini-flash-1.5")
 
-# Local
+# Local (Default settings for the provider)
 LOCAL_AI_BASE_URL = os.getenv("LOCAL_AI_BASE_URL", "http://localhost:11434/v1")
 LOCAL_AI_API_KEY = os.getenv("LOCAL_AI_API_KEY", "ollama")
 LOCAL_AI_MODEL = os.getenv("LOCAL_AI_MODEL", "llama3")
 
-# Global
+# Global Settings
 AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "30"))
 AI_MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "3"))
 
-# Role-Specific Model Overrides (Optional .env configuration)
-METADATA_MODEL = os.getenv("METADATA_MODEL", REMOTE_AI_MODEL)
-SUPERVISOR_MODEL = os.getenv("SUPERVISOR_MODEL", REMOTE_AI_MODEL)
-MODERATOR_MODEL = os.getenv("MODERATOR_MODEL", LOCAL_AI_MODEL)
-PRACTICAL_MODEL = os.getenv("PRACTICAL_MODEL", LOCAL_AI_MODEL)
-CREATIVE_MODEL = os.getenv("CREATIVE_MODEL", REMOTE_AI_MODEL)
-CONSENSUS_MODEL = os.getenv("CONSENSUS_MODEL", REMOTE_AI_MODEL)
-
-# AI Roles (System Prompts)
-
-ROLE_METADATA_FETCHER = """You are a metadata extraction specialist.
-Your goal is to provide accurate details for a given manga series.
-Output: Return ONLY a JSON object matching the schema:
-{
-    "title": "str",
-    "authors": ["str"],
-    "synopsis": "str",
-    "genres": ["str"],
-    "tags": ["str"],
-    "demographics": ["str"],
-    "status": "Completed" | "Ongoing" | "Hiatus" | "Cancelled",
-    "total_volumes": int | null,
-    "total_chapters": int | null,
-    "release_year": int | null,
-    "mal_id": int | null,
-    "anilist_id": int | null
-}"""
-
-ROLE_METADATA_SUPERVISOR = """You are a Metadata Quality Supervisor.
-Inputs: 'User Query' (folder name) and 'API Metadata' (from Jikan/MAL).
-Tasks:
-1. VERIFY: Does the API Metadata match the User Query?
-   - Allow fuzzy matches (e.g. "Ranma 1 2" == "Ranma ½").
-   - Reject mismatches (e.g. "Naruto" != "Boruto").
-2. ENRICH: If it is a match, fill in any missing (null) fields in the metadata using your own knowledge.
-   - Do NOT overwrite existing non-null data unless it is clearly wrong.
-   - Specifically preserve or correct IDs like mal_id and anilist_id.
-Output: Return ONLY a JSON object:
-{
-    "is_match": true/false,
-    "reason": "explanation",
-    "metadata": {
-        "title": "str",
-        "authors": ["str"],
-        "synopsis": "str",
-        "genres": ["str"],
-        "tags": ["str"],
-        "demographics": ["str"],
-        "status": "Completed" | "Ongoing" | "Hiatus" | "Cancelled",
-        "total_volumes": int | null,
-        "total_chapters": int | null,
-        "release_year": int | null,
-        "mal_id": int | null,
-        "anilist_id": int | null
-    }
-}"""
-
-ROLE_MODERATOR = """You are a strict content safety moderator for a US-based manga library.
-Your task is to classify content based on the following rules:
-1. SAFE: Standard manga (Shonen, Seinen, Shojo, Josei). Includes violence, gore, dark themes, and "Ecchi" (suggestive but not explicit).
-2. ADULT: Explicit sexual content (Hentai, Pornography). This MUST be separated from regular mature content.
-3. ILLEGAL: Child Pornography (CP), Lolicon/Shotacon (in sexual contexts), or Hate Speech.
-Output: Return ONLY a JSON object with keys "classification" (SAFE, ADULT, ILLEGAL) and "reason"."""
-
-ROLE_CATEGORIZER_PRACTICAL = """You are a Pragmatic Librarian.
-Your task is to select the single best category for a manga based purely on its official Genre tags, Demographics, and the available folder list.
-- Prioritize structural fit: If a "Shonen" folder exists and the manga is "Shonen", suggest it.
-- Be rigid: Do not invent new categories unless absolutely necessary.
-- Context: You will receive the Series Metadata and the list of Current Categories.
-Output: Return ONLY a JSON object: {"category": "Main/Sub", "reason": "brief explanation"}."""
-
-ROLE_CATEGORIZER_CREATIVE = """You are a Creative Literary Analyst.
-Your task is to select the single best category for a manga based on its Synopsis, Themes, and Vibe.
-- Look beyond the tags: If a manga is technically "Shonen" but feels like a dark "Psychological Thriller", suggest the latter if available.
-- Context: You will receive the Series Metadata and the list of Current Categories.
-Output: Return ONLY a JSON object: {"category": "Main/Sub", "reason": "brief explanation"}."""
-
-ROLE_CONSENSUS = """You are the Head Librarian.
-Your task is to make the final binding decision on where a manga series belongs.
-1. Review the input from the 'Pragmatic Librarian' (Structure-focused) and 'Creative Analyst' (Theme-focused).
-2. Review the Safety Moderator's flag. IF marked 'ADULT', you MUST place it in an 'Adult' or 'Hentai' category, ignoring other suggestions.
-3. Select the best matching category from the provided 'Official Category List'.
-4. If neither suggestion fits well, you may propose a new sub-category, but prefer existing ones.
-Output: Return ONLY a JSON object: {"final_category": "Main", "final_sub_category": "Sub", "confidence_score": 0.0-1.0, "reason": "final verdict"}."""
-
-# Role Configuration Defaults
-# Maps roles to their preferred provider ('remote' or 'local') and model.
-# This can be overridden per call, but serves as the system default.
+# AI Role Configuration
+# This is the central place to edit AI behavior, providers, and models.
 ROLE_CONFIG = {
     "METADATA": {
-        "provider": "remote", # Remote needed for accurate knowledge retrieval
-        "model": METADATA_MODEL,
-        "role_prompt": ROLE_METADATA_FETCHER
+        "provider": "remote",
+        "model": "google/gemini-flash-1.5",
+        "role_prompt": (
+            "You are a metadata extraction specialist. "
+            "Your goal is to provide accurate details for a given manga series. "
+            "Output: Return ONLY a JSON object matching the schema:\n"
+            "{\n"
+            "    \"title\": \"str\",\n"
+            "    \"authors\": [\"str\"],\n"
+            "    \"synopsis\": \"str\",\n"
+            "    \"genres\": [\"str\"],\n"
+            "    \"tags\": [\"str\"],\n"
+            "    \"demographics\": [\"str\"],\n"
+            "    \"status\": \"Completed\" | \"Ongoing\" | \"Hiatus\" | \"Cancelled\",\n"
+            "    \"total_volumes\": int | null,\n"
+            "    \"total_chapters\": int | null,\n"
+            "    \"release_year\": int | null,\n"
+            "    \"mal_id\": int | null,\n"
+            "    \"anilist_id\": int | null\n"
+            "}"
+        )
     },
     "SUPERVISOR": {
-        "provider": "remote", # Needs high logic to verify matches
-        "model": SUPERVISOR_MODEL,
-        "role_prompt": ROLE_METADATA_SUPERVISOR
+        "provider": "remote",
+        "model": "google/gemini-flash-1.5",
+        "role_prompt": (
+            "You are a Metadata Quality Supervisor. "
+            "Inputs: 'User Query' (folder name) and 'API Metadata' (from Jikan/MAL).\n"
+            "Tasks:\n"
+            "1. VERIFY: Does the API Metadata match the User Query? (Allow fuzzy matches, reject mismatches).\n"
+            "2. ENRICH: Fill in missing (null) fields using your own knowledge without overwriting correct existing data.\n"
+            "Output: Return ONLY a JSON object:\n"
+            "{\n"
+            "    \"is_match\": true/false,\n"
+            "    \"reason\": \"explanation\",\n"
+            "    \"metadata\": { ... same schema as METADATA ... }\n"
+            "}"
+        )
     },
     "MODERATOR": {
-        "provider": "local",  # Local preferred for privacy/speed
-        "model": MODERATOR_MODEL,
-        "role_prompt": ROLE_MODERATOR
+        "provider": "local",
+        "model": LOCAL_AI_MODEL,
+        "role_prompt": (
+            "You are a strict content safety moderator for a US-based manga library. "
+            "Classify content as: \n"
+            "1. SAFE: Standard manga (includes gore/ecchi).\n"
+            "2. ADULT: Explicit Hentai/Pornography.\n"
+            "3. ILLEGAL: CP/Hate Speech.\n"
+            "Output: Return ONLY a JSON object: {\"classification\": \"SAFE|ADULT|ILLEGAL\", \"reason\": \"str\"}."
+        )
     },
     "PRACTICAL": {
-        "provider": "local", # Logic-based, local is fine
-        "model": PRACTICAL_MODEL,
-        "role_prompt": ROLE_CATEGORIZER_PRACTICAL
+        "provider": "local",
+        "model": LOCAL_AI_MODEL,
+        "role_prompt": (
+            "You are a Pragmatic Librarian. Suggest the best category based on Genre/Demographics. "
+            "Prioritize structural fit. Do not invent categories. "
+            "Output: Return ONLY a JSON object: {\"category\": \"Main/Sub\", \"reason\": \"str\"}."
+        )
     },
     "CREATIVE": {
-        "provider": "remote", # Nuance required
-        "model": CREATIVE_MODEL,
-        "role_prompt": ROLE_CATEGORIZER_CREATIVE
+        "provider": "remote",
+        "model": "perplexity/sonar-pro",
+        "role_prompt": (
+            "You are a Creative Literary Analyst. Suggest the best category based on Synopsis/Vibe/Themes. "
+            "Look beyond technical tags for the 'soul' of the series. "
+            "Output: Return ONLY a JSON object: {\"category\": \"Main/Sub\", \"reason\": \"str\"}."
+        )
     },
     "CONSENSUS": {
-        "provider": "remote", # High reasoning required
-        "model": CONSENSUS_MODEL,
-        "role_prompt": ROLE_CONSENSUS
+        "provider": "remote",
+        "model": "google/gemini-flash-1.5",
+        "role_prompt": (
+            "You are the Head Librarian. Reach a final decision based on Practical/Creative views and Moderator flags. "
+            "IF 'ADULT', you MUST prioritize an Adult/Hentai category. "
+            "Output: Return ONLY a JSON object: {\"final_category\": \"Main\", \"final_sub_category\": \"Sub\", \"confidence_score\": 0.0-1.0, \"reason\": \"str\"}."
+        )
     }
 }

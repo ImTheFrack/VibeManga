@@ -239,7 +239,7 @@ def normalize_pull_filenames(pull_dir: Path, series_name: str) -> None:
             
             progress.advance(task)
 
-def process_grab(name: Optional[str], input_file: str, status: bool, root_path: str, auto_add: bool = False) -> None: 
+def process_grab(name: Optional[str], input_file: str, status: bool, root_path: str, auto_add: bool = False, auto_add_only: bool = False, max_downloads: Optional[int] = None) -> None: 
     """
     Selects a manga from matched results and adds it to qBittorrent.
     
@@ -249,6 +249,8 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
         status: If True, show current qBittorrent status instead of grabbing.
         root_path: Path to the library root directory.
         auto_add: If True, automatically grab new volumes without prompting.
+        auto_add_only: If True, same as auto_add but skips non-matching groups instead of prompting.
+        max_downloads: Maximum number of items to auto-add before stopping.
     """
     qbit = QBitAPI()
 
@@ -347,6 +349,7 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
             return
 
     current_idx = start_idx
+    total_added_count = 0
     
     while current_idx < len(manga_groups):
         group = manga_groups[current_idx]
@@ -426,7 +429,11 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                 continue
 
         # Auto-Add Logic
-        if auto_add:
+        if auto_add or auto_add_only:
+            if max_downloads is not None and total_added_count >= max_downloads:
+                console.print(f"[yellow]Max downloads limit ({max_downloads}) reached. Stopping.[/yellow]")
+                return
+
             def is_jxl(f):
                 n = f.get("name", "").lower()
                 return "jxl" in n or "jpeg-xl" in n or "jpegxl" in n
@@ -485,6 +492,10 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                 console.print(f"[bold blue]Auto-Adding {len(files_to_auto_add)} torrent(s) for: {', '.join(group['parsed_name'])}[/bold blue]")
                 added_count = 0
                 for f, reason in files_to_auto_add:
+                    if max_downloads is not None and total_added_count >= max_downloads:
+                        console.print(f"[yellow]Max downloads limit ({max_downloads}) reached. Stopping.[/yellow]")
+                        return
+
                     magnet = f.get("magnet_link")
                     if magnet:
                         if qbit.add_torrent([magnet], tag=QBIT_DEFAULT_TAG, savepath=QBIT_DEFAULT_SAVEPATH):
@@ -492,6 +503,7 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                             console.print(f"   [dim]Reason: {reason}[/dim]")
                             f["grab_status"] = "grabbed"
                             added_count += 1
+                            total_added_count += 1
                         else:
                             console.print(f"[red] - Failed to add: {f.get('name')}[/red]")
                 
@@ -504,6 +516,11 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                     
                     current_idx += 1
                     continue
+        
+        if auto_add_only:
+             console.print(f"[dim]Skipping Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (Auto-add criteria not met)[/dim]")
+             current_idx += 1
+             continue
 
         console.print(Rule(style="dim"))
         # Show selection info
