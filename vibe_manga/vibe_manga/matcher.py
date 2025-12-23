@@ -226,6 +226,10 @@ def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
 
     # 1.5 Pre-Cleanup: Handle specific edge cases like (Void) | Completed
     clean_title = title
+
+    # Strip archive extensions (for single-file torrents)
+    clean_title = re.sub(r"\.(cbz|cbr|zip|rar|7z|epub|pdf)$", "", clean_title, flags=re.IGNORECASE)
+
     if "(Void)" in title:
         clean_title = re.sub(r"\(Void\).*?\|.*$", "", clean_title, flags=re.IGNORECASE)
 

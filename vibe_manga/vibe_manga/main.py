@@ -47,7 +47,9 @@ from .nyaa_scraper import scrape_nyaa, get_latest_timestamp_from_nyaa
 from .matcher import process_match, consolidate_entries
 from .grabber import process_grab, process_pull
 from .categorizer import suggest_category, get_category_list
+from .qbit_api import QBitAPI
 from .constants import (
+    QBIT_DEFAULT_TAG,
     DEFAULT_TREE_DEPTH,
     BYTES_PER_KB,
     BYTES_PER_MB,
@@ -61,7 +63,7 @@ from .constants import (
     CLEAN_WORD_RE,
     STOP_WORDS
 )
-from .ai_api import get_available_models
+from .ai_api import get_available_models, tracker
 from .config import load_ai_config, save_ai_config, get_role_config
 
 # Initialize Rich Console
@@ -525,9 +527,6 @@ def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, proces
     table.add_column("Source", justify="center", style="dim")
     table.add_column("Genres/Tags", style="dim")
     table.add_column("Authors", style="cyan")
-
-    # Final AI Report
-    from .ai_api import tracker
     
     # Progress Layout
     progress = Progress(
@@ -732,10 +731,10 @@ def categorize(query: Optional[str], auto: bool, simulate: bool, no_cache: bool,
         console.print("[bold yellow][SIMULATION MODE] No folders will be moved.[/bold yellow]\n")
 
     import shutil
+    countcurserries = 1
     for main, sub, series in uncategorized_series:
-        console.print(Rule(f"[bold blue]Categorizing: {series.name}[/bold blue]"))
-        console.print(f"[dim]Current Location: {main.name} > {sub.name}[/dim]")
-        
+        console.print(Rule(f"[bold blue][{countcurserries} of {len(uncategorized_series)}] Categorizing: {series.name}[/bold blue]"))
+        countcurserries += 1     
         user_feedback = None
         should_move = False
         final_cat_path = None
@@ -759,10 +758,77 @@ def categorize(query: Optional[str], auto: bool, simulate: bool, no_cache: bool,
                 # Moderation Check
                 mod = results.get("moderation", {})
                 is_flagged = mod.get("classification") != "SAFE"
+                is_illegal = mod.get("classification") == "ILLEGAL"
                 
+                # --- VISUALIZATION ---
+                meta_obj = results.get("metadata")
+                
+                # 1. Metadata Summary
+                meta_text = Text()
+                if meta_obj:
+                    if meta_obj.genres:
+                        meta_text.append("Genres: ", style="bold blue")
+                        meta_text.append(", ".join(meta_obj.genres[:4]), style="dim")
+                        meta_text.append(" | ")
+                    if meta_obj.demographics:
+                        meta_text.append("Demo: ", style="bold magenta")
+                        meta_text.append(", ".join(meta_obj.demographics), style="dim")
+                        meta_text.append(" | ")
+                    if meta_obj.release_year:
+                        meta_text.append(f"Year: {meta_obj.release_year}", style="dim")
+                
+                # 2. Synopsis
+                syn_panel = None
+                if meta_obj and meta_obj.synopsis:
+                     syn = meta_obj.synopsis
+                     if len(syn) > 180: syn = syn[:177] + "..."
+                     syn_panel = Panel(Text(syn, style="italic"), title="Synopsis", border_style="dim", box=box.SIMPLE)
+
+                # 3. AI Council Grid
+                council_grid = Table.grid(expand=True, padding=(0, 1))
+                council_grid.add_column(ratio=1)
+                council_grid.add_column(ratio=1)
+                council_grid.add_column(ratio=1)
+                
+                # Helpers for panels
+                def get_panel(role, data, color):
+                    if not data: return Panel("N/A", title=role, border_style="dim")
+                    content = ""
+                    if role == "Moderator":
+                        cls = data.get("classification", "?")
+                        content = f"[bold]{cls}[/bold]\n"
+                    elif role == "Practical" or role == "Creative":
+                        cat = data.get("category", "?")
+                        content = f"[bold]{cat}[/bold]\n"
+                    
+                    reason = data.get("reason", "")
+                    if len(reason) > 80: reason = reason[:77] + "..."
+                    content += f"[dim]{reason}[/dim]"
+                    return Panel(content, title=role, border_style=color)
+
+                p_mod = get_panel("Moderator", results.get("moderation"), "red" if is_flagged else "green")
+                p_prac = get_panel("Practical", results.get("practical"), "blue")
+                p_crea = get_panel("Creative", results.get("creative"), "magenta")
+                
+                council_grid.add_row(p_mod, p_prac, p_crea)
+
+                # 4. Consensus
+                cons_text = f"[bold green]{final_cat}/{final_sub}[/bold green] (Conf: {conf:.2f})"
+                cons_reason = f"[dim]{reason}[/dim]"
+                cons_panel = Panel(f"{cons_text}\n{cons_reason}", title="Consensus", border_style="yellow")
+
+                console.print(meta_text)
+                if syn_panel: console.print(syn_panel)
+                console.print(council_grid)
+                console.print(cons_panel)
+                # ---------------------
+
                 # Auto-Delete on Mod Flag (Handle before menu loop)
-                if is_flagged and auto:
-                    console.print(f"[bold red]AUTO-MODE: Moderation flag detected. DELETING {series.name}...[/bold red]")
+                if is_illegal and auto:
+                    console.print(Rule("[bold red]AUTO-MODE: ILLEGAL CONTENT DETECTED[/bold red]"))
+                    console.print(Panel(json.dumps(mod, indent=2), title="Moderator Full Response", border_style="red"))
+                    console.print(f"[bold red]DELETING {series.name}...[/bold red]")
+                    
                     if not simulate:
                         try:
                             shutil.rmtree(series.path)
@@ -775,6 +841,10 @@ def categorize(query: Optional[str], auto: bool, simulate: bool, no_cache: bool,
                 
                 # Auto-Move (if no flag)
                 if auto:
+                    if pause:
+                        console.print("[dim]Paused. Press Enter to continue...[/dim]")
+                        click.pause()
+                        
                     final_cat_path = Path(root_path) / final_cat / final_sub / series.name
                     should_move = True
                     break
@@ -782,43 +852,6 @@ def categorize(query: Optional[str], auto: bool, simulate: bool, no_cache: bool,
                 # Inner Menu Loop (Display & Choice)
                 action_taken = False
                 while True:
-                    # Display Metadata for Context
-                    meta_obj = results.get("metadata")
-                    if meta_obj:
-                        console.print(Rule("[bold]Series Metadata[/bold]"))
-                        
-                        # Tags/Genres Row
-                        tag_text = ""
-                        if meta_obj.genres:
-                            tag_text += f"[bold blue]Genres:[/bold blue] {', '.join(meta_obj.genres)}  "
-                        if meta_obj.demographics:
-                            tag_text += f"[bold magenta]Demographics:[/bold magenta] {', '.join(meta_obj.demographics)}  "
-                        if meta_obj.tags:
-                            # Show only first 5 tags to avoid clutter
-                            shown_tags = meta_obj.tags[:5]
-                            more_tags = len(meta_obj.tags) - 5
-                            tag_str = ', '.join(shown_tags)
-                            if more_tags > 0:
-                                tag_str += f" (+{more_tags} more)"
-                            tag_text += f"[bold cyan]Themes:[/bold cyan] {tag_str}"
-                        
-                        if tag_text:
-                            console.print(Padding(tag_text, (0, 2)))
-                            
-                        # Synopsis (Truncated)
-                        if meta_obj.synopsis:
-                            syn = meta_obj.synopsis
-                            if len(syn) > 300:
-                                syn = syn[:297] + "..."
-                            console.print(Padding(f"[italic]{syn}[/italic]", (1, 2)))
-                            
-                    console.print(Rule("[bold]AI Suggestion[/bold]"))
-                    console.print(f"  [bold]Target:[/bold] [green]{final_cat} / {final_sub}[/green] (Confidence: {conf:.2f})")
-                    console.print(f"  [bold]Reason:[/bold] {reason}")
-                    
-                    if is_flagged:
-                        console.print(f"  [bold red]MODERATION WARNING:[/bold red] {mod.get('classification')} - {mod.get('reason')}")
-
                     # Improved Menu with Table
                     console.print("\n[bold]Options:[/bold]")
                     menu_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
@@ -913,15 +946,62 @@ def categorize(query: Optional[str], auto: bool, simulate: bool, no_cache: bool,
                 continue
 
             if final_cat_path.exists():
-                console.print(f"[red]Error: Target directory already exists: {final_cat_path}[/red]")
-                continue
+                console.print(f"[yellow]Target directory exists: {final_cat_path}[/yellow]")
+                console.print("[dim]Attempting to merge contents...[/dim]")
                 
-            console.print(f"[dim]Moving to: {final_cat_path}[/dim]")
-            final_cat_path.parent.mkdir(parents=True, exist_ok=True)
-            series.path.rename(final_cat_path)
-            console.print("[green]✓ Move successful.[/green]")
+                moved_count = 0
+                conflict_count = 0
+                
+                try:
+                    for item in series.path.iterdir():
+                        dest = final_cat_path / item.name
+                        if dest.exists():
+                            console.print(f"  [red]Skipping {item.name} (Destination exists)[/red]")
+                            conflict_count += 1
+                        else:
+                            shutil.move(str(item), str(dest))
+                            moved_count += 1
+                    
+                    console.print(f"[green]✓ Merged {moved_count} items.[/green]")
+                    if conflict_count > 0:
+                        console.print(f"[yellow]! {conflict_count} items skipped due to conflicts.[/yellow]")
+                    
+                    # Check if source is empty and remove if so
+                    if not any(series.path.iterdir()):
+                        series.path.rmdir()
+                        console.print("[dim]Source directory removed.[/dim]")
+                    else:
+                        console.print("[yellow]Source directory not empty (conflicts remaining). Kept.[/yellow]")
+                        
+                except Exception as e:
+                    console.print(f"[red]Error during merge: {e}[/red]")
+
+            else:
+                console.print(f"[dim]Moving to: {final_cat_path}[/dim]")
+                final_cat_path.parent.mkdir(parents=True, exist_ok=True)
+                series.path.rename(final_cat_path)
+                console.print("[green]✓ Move successful.[/green]")
 
     console.print(Rule("[bold magenta]Categorization Complete[/bold magenta]"))
+
+    # Final AI Report
+    usage = tracker.get_summary()
+    if usage:
+        console.print("")
+        report = Table(title="AI Usage Summary", box=box.SIMPLE_HEAD)
+        report.add_column("Model", style="cyan")
+        report.add_column("Input Tokens", justify="right")
+        report.add_column("Output Tokens", justify="right")
+        report.add_column("Total", justify="right", style="bold white")
+        
+        for model, counts in usage.items():
+            report.add_row(
+                model,
+                str(counts["prompt"]),
+                str(counts["completion"]),
+                str(counts["prompt"] + counts["completion"])
+            )
+        console.print(report)
 
 @cli.command()
 @click.argument("query", required=False)
@@ -1244,7 +1324,10 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
             t.add_column("Pages", justify="right", style="blue")
         t.add_column("Size (GB)", justify="right", style="yellow")
         
-        for cat in library.categories:
+        # Sort by total size (descending)
+        sorted_cats = sorted(library.categories, key=lambda c: c.total_size_bytes, reverse=True)
+
+        for cat in sorted_cats:
             cat_gb = cat.total_size_bytes / BYTES_PER_GB
             row = [cat.name, str(len(cat.sub_categories)), str(cat.total_series_count), str(cat.total_volume_count)]
             if continuity:
@@ -1637,19 +1720,20 @@ def show(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
 @click.option("--deep", is_flag=True, help="Perform deep analysis (page counts).")
 @click.option("--verify", is_flag=True, help="Verify archive integrity (slow).")
 @click.option("--no-cache", is_flag=True, help="Force fresh scan, ignore cache.")
-def dedupe(query: Optional[str], verbose: bool, deep: bool, verify: bool, no_cache: bool) -> None:
+@click.option("--structural-only", is_flag=True, help="Only check for structural duplicates (folder level).")
+def dedupe(query: Optional[str], verbose: bool, deep: bool, verify: bool, no_cache: bool, structural_only: bool) -> None:
     """
     Finds duplicate volumes.
     If QUERY is provided, only matching series are checked.
     Otherwise, the whole library is scanned.
     """
-    logger.info(f"Dedupe command started (query={query}, verbose={verbose}, deep={deep}, verify={verify}, no_cache={no_cache})")
+    logger.info(f"Dedupe command started (query={query}, verbose={verbose}, deep={deep}, verify={verify}, no_cache={no_cache}, structural_only={structural_only})")
     root_path = get_library_root()
     scan_desc = f"[bold green]Deduplicating '{query}'..." if query else "[bold green]Deduplicating Library..."
     library = run_scan_with_progress(root_path, scan_desc, use_cache=not no_cache)
     
     # Filter targets for deep analysis first
-    if deep or verify:
+    if (deep or verify) and not structural_only:
         targets = []
         with console.status("[bold blue]Filtering targets for analysis..."):
             for main_cat in library.categories:
@@ -1670,6 +1754,9 @@ def dedupe(query: Optional[str], verbose: bool, deep: bool, verify: bool, no_cac
             console.print("-" * 40)
     elif query:
         console.print(f"[dim]No structural duplicates found for '{query}'[/dim]")
+    
+    if structural_only:
+        return
 
     # 2. File Duplicates
     found_any = False
@@ -1861,6 +1948,72 @@ def pull(input_file: str, simulate: bool, pause: bool) -> None:
     """
     root_path = get_library_root()
     process_pull(simulate=simulate, pause=pause, root_path=root_path, input_file=input_file)
+
+@cli.command()
+@click.option("--input-file", default="nyaa_match_results.json", help="Matched results JSON to update status.")
+@click.pass_context
+def pullcomplete(ctx, input_file: str) -> None:
+    """
+    Runs a full update cycle: pull -> stats -> metadata -> categorize.
+    Then checks download queue and replenishes if < 150 active torrents.
+    """
+    console.print(Rule("[bold magenta]Starting Full Update Cycle[/bold magenta]"))
+    
+    # 1. Pull
+    console.print("\n[bold cyan]Step 1/6: Pulling Completed Torrents[/bold cyan]")
+    ctx.invoke(pull, input_file=input_file, simulate=False, pause=False)
+    
+    # 2. Refresh Cache (Silent Scan)
+    console.print("\n[bold cyan]Step 2/6: Refreshing Library Cache[/bold cyan]")
+    root = get_library_root()
+    # We run the scan directly to update cache without printing the full stats report
+    run_scan_with_progress(root, "[bold green]Refreshing Cache...[/bold green]", use_cache=False)
+    
+    # 3. Metadata
+    console.print("\n[bold cyan]Step 3/6: Updating Metadata[/bold cyan]")
+    ctx.invoke(metadata, query=None, force_update=False, trust_jikan=False, process_all=True, model_assign=False)
+    
+    # 4. Categorize
+    console.print("\n[bold cyan]Step 4/6: Auto-Categorizing[/bold cyan]")
+    ctx.invoke(categorize, query=None, auto=True, simulate=False, no_cache=True, model_assign=False, pause=False)
+    
+    # 5. Replenish
+    console.print("\n[bold cyan]Step 5/6: Checking Download Queue[/bold cyan]")
+    try:
+        qbit = QBitAPI()
+        torrents = qbit.get_torrents_info(tag=QBIT_DEFAULT_TAG)
+        count = len(torrents)
+        LIMIT = 150
+        
+        if count < LIMIT:
+            needed = LIMIT - count
+            console.print(f"[green]Queue has {count} items. Replenishing up to {LIMIT} (Need {needed})...[/green]")
+            
+            # a. Scrape
+            console.print("[dim]Running Scrape...[/dim]")
+            ctx.invoke(scrape, pages=NYAA_DEFAULT_PAGES_TO_SCRAPE, output=NYAA_DEFAULT_OUTPUT_FILENAME, user_agent=None, force=False, summarize=False)
+            
+            # b. Match
+            console.print("[dim]Running Match...[/dim]")
+            ctx.invoke(match, query=None, input_file=NYAA_DEFAULT_OUTPUT_FILENAME, output_file=input_file, table=False, show_all=False, no_cache=True, stats=False, no_parallel=False)
+            
+            # c. Grab
+            console.print(f"[dim]Running Grab (Auto-Add Max {needed})...[/dim]")
+            ctx.invoke(grab, name=None, input_file=input_file, status=False, auto_add=False, auto_add_only=True, max_downloads=needed)
+            
+        else:
+            console.print(f"[yellow]Queue is full ({count} >= {LIMIT}). Skipping replenishment.[/yellow]")
+            
+    except Exception as e:
+        console.print(f"[red]Error during replenishment step: {e}[/red]")
+        logger.error(f"Replenish failed: {e}", exc_info=True)
+
+    # 6. Final Stats
+    console.print("\n[bold cyan]Step 6/6: Final Library Statistics[/bold cyan]")
+    # We use no_cache=True to ensure we see the result of any moves done by Categorize
+    ctx.invoke(stats, query=None, continuity=False, deep=False, verify=False, no_cache=True, no_metadata=False)
+
+    console.print(Rule("[bold green]Full Update Cycle Complete[/bold green]"))
 
 if __name__ == "__main__":
     cli()

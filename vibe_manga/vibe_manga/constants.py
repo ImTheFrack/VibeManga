@@ -179,7 +179,7 @@ ROLE_CONFIG = {
             "Classify content as: \n"
             "1. SAFE: Standard manga (includes gore/ecchi).\n"
             "2. ADULT: Explicit Hentai/Pornography.\n"
-            "3. ILLEGAL: CP/Hate Speech.\n"
+            "3. ILLEGAL: CP/CSAM/Hate Speech.\n"
             "Output: Return ONLY a JSON object: {\"classification\": \"SAFE|ADULT|ILLEGAL\", \"reason\": \"str\"}."
         )
     },
@@ -194,7 +194,7 @@ ROLE_CONFIG = {
     },
     "CREATIVE": {
         "provider": "remote",
-        "model": "perplexity/sonar-pro",
+        "model": "openrouter.google/gemini-3-flash-preview",
         "role_prompt": (
             "You are a Creative Literary Analyst. Suggest the best category based on Synopsis/Vibe/Themes. "
             "Look beyond technical tags for the 'soul' of the series. "
@@ -203,7 +203,7 @@ ROLE_CONFIG = {
     },
     "CONSENSUS": {
         "provider": "remote",
-        "model": "google/gemini-flash-1.5",
+        "model": "openrouter.google/gemini-3-flash-preview",
         "role_prompt": (
             "You are the Head Librarian. Reach a final decision based on Practical/Creative views and Moderator flags. "
             "IF 'ADULT', you MUST prioritize an Adult/Hentai category. "

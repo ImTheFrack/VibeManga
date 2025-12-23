@@ -166,78 +166,80 @@ def vibe_format_range(numbers: List[float], prefix: str = "", pad: int = 0) -> s
         # Range: v01-05
         return f"{prefix}{fmt(start)}-{fmt(end)}"
 
-def normalize_pull_filenames(pull_dir: Path, series_name: str) -> None:
-    """Recursively renames files in pull_dir to match our naming convention."""
+def generate_transfer_plan(source_root: Path, series_name: str) -> List[Dict]:
+    """
+    Scans source_root for files, generates normalized names, and returns a plan.
+    Does NOT move or rename files.
+    """
     files_to_process = []
-    for root, _, files in os.walk(pull_dir):
-        for f in files:
-            path = Path(root) / f
-            # Common archive/manga extensions
-            if path.suffix.lower() in [".cbz", ".cbr", ".pdf", ".zip", ".rar", ".7z"]:
-                files_to_process.append(path)
-                
+    
+    if source_root.is_file():
+        # Handle single-file torrents
+        if source_root.suffix.lower() in [".cbz", ".cbr", ".pdf", ".zip", ".rar", ".7z", ".epub"]:
+            files_to_process.append(source_root)
+    else:
+        # Walk and collect
+        for root, _, files in os.walk(source_root):
+            for f in files:
+                path = Path(root) / f
+                # Common archive/manga extensions
+                if path.suffix.lower() in [".cbz", ".cbr", ".pdf", ".zip", ".rar", ".7z", ".epub"]:
+                    files_to_process.append(path)
+    
     if not files_to_process:
-        return
+        return []
 
-    # Sort alphabetically to ensure sequential fallback follows a logical order
-    files_to_process.sort()
-
+    files_to_process.sort() # Alphabetical sort for consistency
+    
+    plan = []
+    seen_names = set()
     fallback_idx = 1
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        console=console,
-        refresh_per_second=PROGRESS_REFRESH_RATE
-    ) as progress:
-        task = progress.add_task(f"Normalizing {len(files_to_process)} filenames...", total=len(files_to_process))
+    
+    for path in files_to_process:
+        v_nums, ch_nums, u_nums = classify_unit(path.name)
         
-        for path in files_to_process:
-            v_nums, ch_nums, u_nums = classify_unit(path.name)
+        # Preferences: Volumes padded to 2, Chapters to 3
+        v_str = vibe_format_range(v_nums, prefix="v", pad=2)
+        
+        c_nums = ch_nums
+        c_prefix = ""
+        if not c_nums and not v_nums and u_nums:
+            c_nums = u_nums
+            c_prefix = "c"
             
-            # Preferences: Volumes padded to 2, Chapters to 3
-            v_str = vibe_format_range(v_nums, prefix="v", pad=2)
+        c_str = vibe_format_range(c_nums, prefix=c_prefix, pad=3)
+        
+        parts = []
+        if v_str: parts.append(v_str)
+        if c_str: parts.append(c_str)
+        
+        if not parts:
+            parts.append(f"unit{str(fallback_idx).zfill(3)}")
+            fallback_idx += 1
             
-            # Use ch_nums if present, else u_nums if no v_nums (fallback for naked numbers)
-            c_nums = ch_nums
-            c_prefix = ""
-            if not c_nums and not v_nums and u_nums:
-                c_nums = u_nums
-                c_prefix = "c" # Use chapter prefix for naked numbers
-                
-            c_str = vibe_format_range(c_nums, prefix=c_prefix, pad=3)
+        base_name = f"{series_name} {' '.join(parts)}"
+        ext = path.suffix
+        new_name = f"{base_name}{ext}"
+        
+        # Collision handling (logical)
+        collision_idx = 1
+        while new_name in seen_names:
+            new_name = f"{base_name} ({collision_idx}){ext}"
+            collision_idx += 1
             
-            parts = []
-            if v_str: parts.append(v_str)
-            if c_str: parts.append(c_str)
-            
-            # Fallback: If no numbers were detected at all, use a sequential counter
-            if not parts:
-                parts.append(f"unit{str(fallback_idx).zfill(3)}")
-                fallback_idx += 1
-                
-            # Format: {Series Name} {vXX} {CCC}.[ext]
-            new_name = f"{series_name} {' '.join(parts)}{path.suffix}"
-            new_path = path.parent / new_name
-            
-            if path.name != new_name:
-                try:
-                    if new_path.exists():
-                        # If the name we generated already exists (collision), 
-                        # add a small suffix to keep it unique
-                        collision_idx = 1
-                        while new_path.exists():
-                            alt_name = f"{series_name} {' '.join(parts)} ({collision_idx}){path.suffix}"
-                            new_path = path.parent / alt_name
-                            collision_idx += 1
-                        path.rename(new_path)
-                    else:
-                        path.rename(new_path)
-                except Exception as e:
-                    logger.error(f"Failed to rename {path.name} to {new_name}: {e}")
-            
-            progress.advance(task)
+        seen_names.add(new_name)
+        
+        plan.append({
+            "src": path,
+            "dst_name": new_name,
+            "v": v_nums,
+            "c": c_nums, # Using the raw detected ones for analysis
+            "u": u_nums,
+            "size": path.stat().st_size,
+            "skip": False # Default to keep, will be updated in analysis step
+        })
+        
+    return plan
 
 def process_grab(name: Optional[str], input_file: str, status: bool, root_path: str, auto_add: bool = False, auto_add_only: bool = False, max_downloads: Optional[int] = None) -> None: 
     """
@@ -350,6 +352,7 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
 
     current_idx = start_idx
     total_added_count = 0
+    last_was_skip = False
     
     while current_idx < len(manga_groups):
         group = manga_groups[current_idx]
@@ -363,6 +366,17 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
 
         match_id = group.get("matched_id")
         local_series = series_map.get(match_id) if match_id else None
+
+        # Fallback: Try real-time matching if not found (using robust clean name logic)
+        if not local_series and library:
+            for clean_name in group.get("parsed_name", []):
+                # Try exact/fuzzy match with the clean name
+                found = find_series_match(clean_name, library)
+                if found:
+                    local_series = found
+                    # Update matched_name for display
+                    group['matched_name'] = found.name
+                    break
 
         # Pre-calculate content analysis for auto-skip
         l_v_nums, l_c_nums = [], []
@@ -414,7 +428,8 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
 
             # Auto-skip if no new content
             if not new_v and not new_c:
-                console.print(f"[dim]Auto-skipping Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (No new content or already processed)[/dim]")
+                console.print(f"[dim]Auto-skipping Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (No new content or already processed)[/dim]\x1b[K", end="\r")
+                last_was_skip = True
                 for f in group_files:
                     if not f.get("grab_status"):
                         f["grab_status"] = "skipped"
@@ -431,6 +446,8 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
         # Auto-Add Logic
         if auto_add or auto_add_only:
             if max_downloads is not None and total_added_count >= max_downloads:
+                if last_was_skip:
+                    console.print()
                 console.print(f"[yellow]Max downloads limit ({max_downloads}) reached. Stopping.[/yellow]")
                 return
 
@@ -489,6 +506,9 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                     added_via_completed = True
             
             if files_to_auto_add:
+                if last_was_skip:
+                    console.print()
+                    last_was_skip = False
                 console.print(f"[bold blue]Auto-Adding {len(files_to_auto_add)} torrent(s) for: {', '.join(group['parsed_name'])}[/bold blue]")
                 added_count = 0
                 for f, reason in files_to_auto_add:
@@ -518,9 +538,14 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                     continue
         
         if auto_add_only:
-             console.print(f"[dim]Skipping Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (Auto-add criteria not met)[/dim]")
+             console.print(f"[dim]Skipping Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (Auto-add criteria not met)[/dim]\x1b[K", end="\r")
+             last_was_skip = True
              current_idx += 1
              continue
+
+        if last_was_skip:
+            console.print()
+            last_was_skip = False
 
         console.print(Rule(style="dim"))
         # Show selection info
@@ -649,6 +674,9 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                 current_idx += 1
         else:
             console.print("[red]Invalid input. Use IDs (e.g. 1,2), 'all', 's', 'n', or 'q'.[/red]")
+
+    if last_was_skip:
+        console.print()
 
     if current_idx >= len(manga_groups):
         console.print("[green]Reached the end of the match list.[/green]")
@@ -803,19 +831,146 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                 console.print(f"[red][2/8] ✗ Could not find files at: {content_path}[/red]")
                 if not click.confirm("Continue anyway?"):
                     break
+                    
+        # --- NEW FLOW START ---
+        
+        # Step 3: Calculate Names (In-Memory Normalization)
+        # Extract the plain series name from the matched/parsed name.
+        series_name = re.sub(r"\[.*?\]", "", display_name).strip()
+        series_name = re.sub(r"^\d+\.\s+", "", series_name)
+        series_name = sanitize_filename(series_name)
+        
+        action_msg = f"[3/8] Analyzing content and generating plan for: {series_name}"
+        if simulate:
+            console.print(f"[yellow][3/8] SIMULATE: {action_msg}[/yellow]")
+        
+        transfer_plan = []
+        if os.path.exists(content_path):
+             transfer_plan = generate_transfer_plan(Path(content_path), series_name)
+        
+        if not transfer_plan:
+            console.print(f"[red][3/8] ✗ No valid files found in {content_path}[/red]")
+            continue
 
-        # Step 3: Copy to PULL_TEMPDIR
+        console.print(f"[green][3/8] ✓ Identified {len(transfer_plan)} potential files.[/green]")
+
+        # Step 4: Analyze (Filter Plan)
+        local_series = None
+        # Match to library (Prioritize match_data over fuzzy match)
+        if match_data and series_map:
+            for entry in match_data:
+                if entry.get("name") == t["name"]:
+                    mid = entry.get("matched_id")
+                    if mid and mid in series_map:
+                        local_series = series_map[mid]
+                    break
+        
+        if not local_series:
+            # Try matching using the sanitized series name (cleaner than torrent name)
+            # Handle potential multi-part names (e.g. "Title A ｜ Title B")
+            candidates = [series_name]
+            if "｜" in series_name:
+                candidates.extend([p.strip() for p in series_name.split("｜")])
+            
+            for cand in candidates:
+                local_series = find_series_match(cand, library)
+                if local_series:
+                    break
+            
+            # Fallback to raw torrent name if still not found
+            if not local_series:
+                local_series = find_series_match(t['name'], library)
+
+        action_msg = "[4/8] Filtering content against library..."
+        pulled_vols, pulled_chaps, pulled_units = [], [], []
+        new_v, new_c = [], []
+        
+        # Collect detected numbers from plan
+        for item in transfer_plan:
+            pulled_vols.extend(item['v'])
+            pulled_chaps.extend(item['c'])
+            pulled_units.extend(item['u'])
+            
+        pulled_v_str = format_ranges(pulled_vols)
+        pulled_c_str = format_ranges(pulled_chaps)
+        pulled_u_str = format_ranges(pulled_units)
+        
+        console.print(f"[bold green][4/8] Scraped Content:[/bold green] Vols: {pulled_v_str} | Chaps: {pulled_c_str} | Units: {pulled_u_str}")
+
+        if local_series:
+            console.print(f"[green][4/8] Matched to Library: {local_series.name}[/green]")
+            all_local_vols = local_series.volumes + [v for sg in local_series.sub_groups for v in sg.volumes]
+            l_v_nums, l_c_nums = [], []
+            for v in all_local_vols:
+                v_n, c_n, u_n = classify_unit(v.name)
+                l_v_nums.extend(v_n); l_c_nums.extend(c_n + u_n)
+            
+            l_v_set, l_c_set = set(l_v_nums), set(l_c_nums)
+            
+            # Identify what is truly new
+            new_v = sorted(list(set(n for n in pulled_vols if n not in l_v_set)))
+            new_c = sorted(list(set(n for n in pulled_chaps if n not in l_c_set)))
+            
+            if new_v or new_c:
+                console.print(f"[bold yellow][4/8] Fills Gaps:[/bold yellow] Vols: {format_ranges(new_v)} | Chaps: {format_ranges(new_c)}")
+            else:
+                console.print("[yellow][4/8] All pulled content already exists in library (Potential Upgrade/Duplicate).[/yellow]")
+                
+            # Update Plan: Mark duplicates as skipped
+            skipped_count = 0
+            for item in transfer_plan:
+                # Logic: If item provides NO new volumes AND NO new chapters/units -> Check size for upgrade
+                # Actually, simplistic check: if all its numbers are in local set, it's a potential duplicate.
+                
+                is_redundant = True
+                if item['v']:
+                    if any(n not in l_v_set for n in item['v']): is_redundant = False
+                elif item['c']:
+                    if any(n not in l_c_set for n in item['c']): is_redundant = False
+                elif item['u']: # Units treated as chapters usually
+                     if any(n not in l_c_set for n in item['u']): is_redundant = False
+                else:
+                    # No numbers? Keep it to be safe (might be extra art)
+                    is_redundant = False
+                    
+                if is_redundant:
+                    # It covers known range. Check if we want to skip it.
+                    # For now, let's skip strict duplicates (same size? or just redundant content?)
+                    # The user said "Step 3 could just copy the files it needs".
+                    # Let's assume redundant = skip unless size is significantly larger?
+                    # The original code just imported "files_to_import" if "fills_gap" was true.
+                    # "fills_gap" logic was: is_new OR not (l_v_set or l_c_set) OR (any n not in set).
+                    
+                    item['skip'] = True
+                    skipped_count += 1
+                    
+            if skipped_count > 0:
+                console.print(f"[dim][4/8] Marking {skipped_count} redundant files to skip copying.[/dim]")
+                
+        else:
+            console.print("[bold cyan][4/8] NEW SERIES: No match found in library. All files will be copied.[/bold cyan]")
+            new_v = sorted(list(set(pulled_vols)))
+            new_c = sorted(list(set(pulled_chaps)))
+
+        # Step 5: Stage (Copy)
+        files_to_stage = [item for item in transfer_plan if not item['skip']]
+        
+        if not files_to_stage:
+             console.print("[yellow][5/8] No files need to be copied (All redundant).[/yellow]")
+             # We might still proceed to cleanup if it was all duplicates?
+             # If user wants to just clear the torrent.
+        
         if not PULL_TEMPDIR:
-            console.print("[red][3/8] ✗ PULL_TEMPDIR is not set in .env. Skipping copy step.[/red]")
+             console.print("[red][5/8] ✗ PULL_TEMPDIR is not set. Cannot stage files.[/red]")
         else:
             dest_dir = Path(PULL_TEMPDIR)
-            src_path = Path(content_path)
             
+            # Clear Temp Dir
             if not simulate:
                 if dest_dir.exists() and any(dest_dir.iterdir()):
-                    console.print(f"[bold red][3/8] Warning: Temp directory is not empty: {dest_dir}[/bold red]")
-                    if Confirm.ask("[3/8] Clear temp directory? [bold red]This is destructive![/bold red]"):
-                        with console.status("[bold red][3/8] Clearing temp directory..."):
+                    console.print(f"[bold red][5/8] Warning: Temp directory is not empty: {dest_dir}[/bold red]")
+                    if Confirm.ask("[5/8] Clear temp directory? [bold red]This is destructive![/bold red]"):
+                        with console.status("[bold red][5/8] Clearing temp directory..."):
                             for item in dest_dir.iterdir():
                                 try:
                                     if item.is_dir():
@@ -823,31 +978,17 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                                     else:
                                         item.unlink()
                                 except Exception as e:
-                                    console.print(f"[red][3/8] Error clearing {item}: {e}[/red]")
-                        console.print("[green][3/8] ✓ Temp directory cleared.[/green]")
+                                    console.print(f"[red][5/8] Error clearing {item}: {e}[/red]")
+                        console.print("[green][5/8] ✓ Temp directory cleared.[/green]")
                     else:
-                        console.print("[yellow][3/8] Pull aborted by user.[/yellow]")
+                        console.print("[yellow][5/8] Pull aborted by user.[/yellow]")
                         break
-
-            action_msg = f"[3/8] Copying files to: {dest_dir}"
+            
+            action_msg = f"[5/8] Staging {len(files_to_stage)} files to: {dest_dir}"
             if simulate:
-                console.print(f"[yellow][3/8] SIMULATE: {action_msg}[/yellow]")
+                console.print(f"[yellow][5/8] SIMULATE: {action_msg}[/yellow]")
             else:
-                try:
-                    if not src_path.exists():
-                        raise FileNotFoundError(f"[3/8] Source path {src_path} does not exist.")
-                    
-                    # Gather all files to copy for granular progress
-                    files_to_copy = []
-                    if src_path.is_dir():
-                        for root, _, files in os.walk(src_path):
-                            for f in files:
-                                file_src = Path(root) / f
-                                rel_path = file_src.relative_to(src_path)
-                                files_to_copy.append((file_src, dest_dir / rel_path))
-                    else:
-                        files_to_copy.append((src_path, dest_dir / src_path.name))
-
+                 try:
                     with Progress(
                         SpinnerColumn(),
                         TextColumn("[progress.description]{task.description}"),
@@ -856,91 +997,23 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                         console=console,
                         refresh_per_second=PROGRESS_REFRESH_RATE
                     ) as progress:
-                        copy_task = progress.add_task(f"[3/8] Copying {len(files_to_copy)} files...", total=len(files_to_copy))
+                        copy_task = progress.add_task(f"[5/8] Copying {len(files_to_stage)} files...", total=len(files_to_stage))
                         
-                        for s, d in files_to_copy:
-                            d.parent.mkdir(parents=True, exist_ok=True)
+                        dest_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        for item in files_to_stage:
+                            # Flatten: Copy directly to PULL_TEMPDIR root with new name
+                            s = item['src']
+                            d = dest_dir / item['dst_name']
+                            
                             shutil.copy2(s, d)
-                            progress.update(copy_task, advance=1, description=f"[dim]Copying: {s.name}[/dim]")
+                            progress.update(copy_task, advance=1, description=f"[dim]Copying: {item['dst_name']}[/dim]")
                     
-                    console.print(f"[green]✓ Successfully copied to: {dest_dir}[/green]")
-                except Exception as e:
-                    console.print(f"[red][3/8] ✗ Copy failed: {e}[/red]")
+                    console.print(f"[green]✓ Successfully staged {len(files_to_stage)} files.[/green]")
+                 except Exception as e:
+                    console.print(f"[red][5/8] ✗ Copy failed: {e}[/red]")
                     if not click.confirm("Continue anyway?"):
                         break
-
-        # Step 4: Normalize Filenames
-        # Extract the plain series name from the matched/parsed name.
-        series_name = re.sub(r"\[.*?\]", "", display_name).strip()
-        series_name = re.sub(r"^\d+\.\s+", "", series_name)
-        series_name = sanitize_filename(series_name)
-        
-        action_msg = f"[4/8] Normalizing filenames for: {series_name}"
-        if simulate:
-            console.print(f"[yellow][4/8] SIMULATE: {action_msg}[/yellow]")
-        else:
-            if PULL_TEMPDIR:
-                normalize_pull_filenames(Path(PULL_TEMPDIR), series_name)
-                console.print(f"[green][4/8] ✓ Filenames normalized.[/green]")
-            else:
-                console.print("[yellow][4/8] ! Skipping normalization: PULL_TEMPDIR not set.[/yellow]")
-
-        # Step 5: Detect Pulled Content
-        local_series = None
-        pulled_files = []
-        action_msg = "[5/8] Detecting pulled content..."
-        if simulate:
-            console.print(f"[yellow][5/8] SIMULATE: {action_msg}[/yellow]")
-        else:
-            pulled_vols, pulled_chaps, pulled_units = [], [], []
-            pulled_size = 0
-            if PULL_TEMPDIR:
-                with console.status(f"[bold blue]{action_msg}"):
-                    for root, _, files in os.walk(PULL_TEMPDIR):
-                        for f in files:
-                            file_path = Path(root) / f
-                            pulled_size += file_path.stat().st_size
-                            v, c, u = classify_unit(f)
-                            pulled_vols.extend(v); pulled_chaps.extend(c); pulled_units.extend(u)
-                            pulled_files.append({"path": file_path, "v": v, "c": c, "u": u})
-                
-                pulled_v_str = format_ranges(pulled_vols)
-                pulled_c_str = format_ranges(pulled_chaps)
-                pulled_u_str = format_ranges(pulled_units)
-                
-                console.print(f"[bold green][5/8] Pulled Content:[/bold green] Vols: {pulled_v_str} | Chaps: {pulled_c_str} | Units: {pulled_u_str} ({format_size(pulled_size)})")
-                
-                # Match to library (Prioritize match_data over fuzzy match)
-                local_series = None
-                if match_data and series_map:
-                    for entry in match_data:
-                        if entry.get("name") == t["name"]:
-                            mid = entry.get("matched_id")
-                            if mid and mid in series_map:
-                                local_series = series_map[mid]
-                            break
-                
-                if not local_series:
-                    local_series = find_series_match(t['name'], library)
-
-                if local_series:
-                    console.print(f"[green][5/8] Matched to Library: {local_series.name}[/green]")
-                    all_local_vols = local_series.volumes + [v for sg in local_series.sub_groups for v in sg.volumes]
-                    l_v_nums, l_c_nums = [], []
-                    for v in all_local_vols:
-                        v_n, c_n, u_n = classify_unit(v.name)
-                        l_v_nums.extend(v_n); l_c_nums.extend(c_n + u_n)
-                    
-                    l_v_set, l_c_set = set(l_v_nums), set(l_c_nums)
-                    new_v = sorted(list(set(n for n in pulled_vols if n not in l_v_set)))
-                    new_c = sorted(list(set(n for n in pulled_chaps if n not in l_c_set)))
-                    
-                    if new_v or new_c:
-                        console.print(f"[bold yellow][5/8] Fills Gaps:[/bold yellow] Vols: {format_ranges(new_v)} | Chaps: {format_ranges(new_c)}")
-                    else:
-                        console.print("[yellow][5/8] All pulled content already exists in library (Potential Upgrade).[/yellow]")
-                else:
-                    console.print("[bold cyan][5/8] NEW SERIES: No match found in library. This will be a new entry.[/bold cyan]")
 
         # Step 6: Import Files
         action_msg = "Importing files into library..."
@@ -960,35 +1033,32 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                     target_dir = Path(library.path) / "Uncategorized" / f"Pulled-{date_str}" / series_name
                     is_new = True
                 
-                if target_dir and pulled_files:
-                    # Collect all local unit numbers if matched
-                    l_v_set, l_c_set = set(), set()
-                    if local_series:
-                        all_local_vols = local_series.volumes + [v for sg in local_series.sub_groups for v in sg.volumes]
-                        for v in all_local_vols:
-                            v_n, c_n, u_n = classify_unit(v.name)
-                            l_v_set.update(v_n); l_c_set.update(c_n + u_n)
+                # We need to reconstruct the file list from PULL_TEMPDIR for the import logic
+                # Since we just staged them, PULL_TEMPDIR should be clean.
+                # The original logic used `pulled_files` (list of dicts).
+                # We can reuse `files_to_stage` but update paths to point to PULL_TEMPDIR
+                
+                files_to_import = []
+                overwrite_count = 0
+                
+                if files_to_stage and PULL_TEMPDIR:
+                     for item in files_to_stage:
+                         # Re-map path to staged location
+                         staged_path = Path(PULL_TEMPDIR) / item['dst_name']
+                         if not staged_path.exists(): continue # Should exist
+                         
+                         # Item already has v/c/u info
+                         file_info = {
+                             "path": staged_path,
+                             "v": item['v'],
+                             "c": item['c'],
+                             "u": item['u']
+                         }
+                         files_to_import.append(file_info)
+                         if (target_dir / item['dst_name']).exists():
+                             overwrite_count += 1
 
-                    # Pre-calculate files that actually need importing
-                    files_to_import = []
-                    overwrite_count = 0
-                    for file_info in pulled_files:
-                        f_path = file_info["path"]
-                        v_nums, ch_nums = file_info["v"], file_info["c"]
-                        fills_gap = is_new or not (l_v_set or l_c_set) 
-                        if not fills_gap:
-                            if any(n not in l_v_set for n in v_nums) or any(n not in l_c_set for n in ch_nums):
-                                fills_gap = True
-                            # Also check units (treated as chapters/unknowns)
-                            if not fills_gap and file_info.get("u"):
-                                if any(n not in l_c_set for n in file_info["u"]):
-                                    fills_gap = True
-                        if fills_gap:
-                            files_to_import.append(file_info)
-                            if (target_dir / f_path.name).exists():
-                                overwrite_count += 1
-
-                    if files_to_import:
+                if files_to_import:
                         if pause:
                             console.print(f"\n[bold yellow][6/8] Ready to import {len(files_to_import)} files from {PULL_TEMPDIR} into: {target_dir}[/bold yellow]")
                             if overwrite_count > 0:
@@ -1004,6 +1074,13 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                         use_subfolders = False 
                         
                         # Gather all volume numbers (local + new)
+                        l_v_set, l_c_set = set(), set()
+                        if local_series:
+                            all_local_vols = local_series.volumes + [v for sg in local_series.sub_groups for v in sg.volumes]
+                            for v in all_local_vols:
+                                v_n, c_n, u_n = classify_unit(v.name)
+                                l_v_set.update(v_n); l_c_set.update(c_n + u_n)
+                        
                         all_vols_set = set(l_v_set)
                         all_chaps_set = set(l_c_set)
                         for f in files_to_import:
@@ -1108,8 +1185,8 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                         
                         if imported_count > 0:
                             console.print(f"[green][6/8] ✓ Successfully imported {imported_count} files.[/green]")
-                    else:
-                        console.print("[yellow][6/8] No Gaps filled, nothing imported.[/yellow]")
+                else:
+                    console.print("[yellow][6/8] No files to import.[/yellow]")
 
         # Step 7: Update Library State
         action_msg = "[7/8] Updating library state..."
