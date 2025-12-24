@@ -46,7 +46,8 @@
 
 ### Phase 1: Setup
 1.  **Scan Library:** standard `run_scan_with_progress`.
-2.  **Determine Mode & Schema:**
+2.  **Build Index:** Initialize and build `LibraryIndex` from the scanned library to ensure fast lookups and identity resolution.
+3.  **Determine Mode & Schema:**
     *   **IF `--newroot` provided:**
         *   Check if path exists (create if needed/prompt).
         *   Scan new root folder for existing folder structure to build `custom_schema`.
@@ -58,11 +59,12 @@
         *   Set **Base Destination = Current Library Path**.
 
 ### Phase 2: Filter
-1.  **Load Metadata:** Iterate through all series in library. Load `series.json` (show progress bar).
+1.  **Hydration Check:** Iterate through series. If `series.metadata.mal_id` is None, trigger a lightweight hydration warning or prompt (since accurate filtering requires metadata).
 2.  **Apply Filters:**
-    *   **Inclusion Logic:** If any inclusion flags (`--tag`, `--genre`, `--source`) are set, the series MUST match *at least one* of them. If no inclusion flags are set, all series are candidates.
+    *   **Inclusion Logic:** If any inclusion flags (`--tag`, `--genre`, `--source`) are set, the series MUST match *at least one* of them. 
+        *   *Note:* Checks `Series.metadata.tags` and `Series.metadata.genres`. `--source` checks `Series.parent.name`.
     *   **Exclusion Logic:** If any exclusion flags (`--no-tag`, etc.) are set, the series MUST NOT match *any* of them.
-    *   **Query Logic:** If `[QUERY]` arg is present, series name must match.
+    *   **Query Logic:** If `[QUERY]` arg is present, resolve target series using `LibraryIndex.search(query)` (matches titles, synonyms, IDs) instead of raw string matching.
 
 ### Phase 3: Execution
 1.  **Iterate Candidates:** Loop through filtered list.
