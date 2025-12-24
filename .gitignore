@@ -23,6 +23,7 @@ credentials.json
 .vibe_manga_cache.pkl
 *.pkl
 *.json
+*.xml
 
 # Log files
 vibe_manga.log

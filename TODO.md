@@ -16,7 +16,9 @@
 ### 1. Management & Organization
 - [ ] **Open Series (`open`)**: 
     - Command to open a series folder in Windows Explorer/Finder.
-
+- [ ] **Re-Organizer (`organize`)**:
+    - Command to reorganize folders with tag, genre, or AI assistance.  See `ORGANIZPLAN.MD` for more.
+    - Once implemented, we can get rid of `categorize` command.
 ### 2. Export & Reporting
 - [ ] **Export Data (`export`)**:
     - Export library data to CSV/JSON for external tools (Excel, data analysis, backup)
@@ -33,16 +35,17 @@
 - [ ] **Interactive Mode**:
     - Launch interactive TUI (Text User Interface) for browsing
     - Keyboard navigation, quick actions
+    - Eventual full web front end?
 - [ ] **Configuration File**:
     - YAML/TOML config instead of just .env
     - Per-directory settings
     - Custom naming patterns
 
 ### 4. Advanced Features
-- [ ] **Metadata Integration**:
+- [X] **Metadata Integration**:
     - Fetch from MangaUpdates, AniList, MyAnimeList
     - Store series descriptions, ratings, status
-    - Auto-match series by name
+    - [NOT IMPLEMENTED]Auto-match series by name
 - [ ] **Reading Progress**:
     - Track read/unread volumes
     - Last read date and position
@@ -71,7 +74,7 @@
     - Merge statistics
 
 ### 6. Quality of Life
-- [ ] **Bulk Operations**:
+- [X] **Bulk Operations**:
     - Move series between categories
     - Rename series/volumes in batch
     - Delete duplicates with confirmation

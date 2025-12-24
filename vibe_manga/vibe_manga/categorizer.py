@@ -34,8 +34,11 @@ def get_ai_categorization(
         # 1. Moderator
         status.update(f"[bold blue]Step 1/4: Consulting Moderator...[/bold blue]")
         mod_config = get_role_config("MODERATOR")
-        mod_prompt = f"Manga Title: {series_name}\nSynopsis: {metadata.synopsis}\nGenres: {metadata.genres}"
+        mod_prompt = f"Manga Title: {series_name}\nSynopsis: {metadata.synopsis}\nGenres: {metadata.genres}\nTags: {metadata.tags}"
         moderation = call_ai(mod_prompt, mod_config["role_prompt"], provider=mod_config["provider"], model=mod_config["model"])
+        if not isinstance(moderation, dict):
+            logger.error(f"Moderator AI returned invalid data: {type(moderation)}. Defaulting to SAFE.")
+            moderation = {"classification": "SAFE", "reason": f"AI Error: Invalid response ({str(moderation)[:50]}...)"}
         results["moderation"] = moderation
         
         # 2. Practical
@@ -43,6 +46,9 @@ def get_ai_categorization(
         prac_config = get_role_config("PRACTICAL")
         prac_prompt = f"Manga: {series_name}\nMetadata: {metadata.to_dict()}\nCategories: {available_categories}"
         practical = call_ai(prac_prompt, prac_config["role_prompt"], provider=prac_config["provider"], model=prac_config["model"])
+        if not isinstance(practical, dict):
+             logger.error(f"Practical AI returned invalid data. Defaulting.")
+             practical = {"category": "Uncategorized/Error", "reason": "AI Error: Invalid response"}
         results["practical"] = practical
         
         # 3. Creative
@@ -50,6 +56,9 @@ def get_ai_categorization(
         crea_config = get_role_config("CREATIVE")
         crea_prompt = f"Manga: {series_name}\nMetadata: {metadata.to_dict()}\nCategories: {available_categories}"
         creative = call_ai(crea_prompt, crea_config["role_prompt"], provider=crea_config["provider"], model=crea_config["model"])
+        if not isinstance(creative, dict):
+             logger.error(f"Creative AI returned invalid data. Defaulting.")
+             creative = {"category": "Uncategorized/Error", "reason": "AI Error: Invalid response"}
         results["creative"] = creative
         
         # 4. Consensus with Validation Loop
@@ -59,6 +68,8 @@ def get_ai_categorization(
         # Base prompt components
         base_cons_prompt = (
             f"Manga: {series_name}\n"
+            f"Genres: {metadata.genres}\n"
+            f"Tags: {metadata.tags}\n"
             f"Official Category List: {available_categories}\n"
             f"Moderator View: {moderation}\n"
             f"Pragmatic View: {practical}\n"
@@ -179,7 +190,8 @@ def get_category_list(library: Library) -> List[str]:
 def suggest_category(
     series: Series,
     library: Library,
-    user_feedback: Optional[str] = None
+    user_feedback: Optional[str] = None,
+    custom_categories: Optional[List[str]] = None
 ) -> Optional[Dict[str, Any]]:
     """
     Fetches metadata and AI suggestions for a single series.
@@ -188,7 +200,10 @@ def suggest_category(
     metadata, source = get_or_create_metadata(series.path, series.name)
     
     # Get flat list of current categories (Main/Sub)
-    available = get_category_list(library)
+    if custom_categories is not None:
+        available = custom_categories
+    else:
+        available = get_category_list(library)
         
     logger.info(f"Requesting AI categorization for '{series.name}'...")
     results = get_ai_categorization(series.name, metadata, available, user_feedback=user_feedback)

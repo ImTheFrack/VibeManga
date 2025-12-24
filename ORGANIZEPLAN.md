@@ -1,0 +1,99 @@
+# Implementation Plan: `organize` Command
+
+**Objective:** Create a granular, filter-based command for **restructuring** (Move) or **selective export** (Copy) of the manga library.
+
+## 1. Core Logic (`categorizer.py`)
+
+*   **Goal:** Enable "Directed Categorization" and schema adaptation.
+*   **Changes:**
+    *   Update `get_category_list` function signature to accept an optional `restrict_to_main` string parameter.
+    *   Update `suggest_category` function signature to accept:
+        *   `custom_categories` (List[str]): For supporting `--newroot` schemas.
+        *   `restrict_to_main` (str): For limiting AI choices to a specific parent category.
+    *   **Logic:** If `restrict_to_main` is present, filter the available category list (whether from library or custom_categories) to only include paths starting with that main category.
+
+## 2. The New Command (`main.py`)
+
+*   **Name:** `organize`
+*   **Default Behavior:** **Filesystem MOVE** within the current library.
+*   **Newroot Behavior:** **Filesystem COPY** from current library to new root.
+
+### Options
+
+**Arguments:** `[QUERY]` (Optional name search).
+
+**Filters (Multi-Value Allowed):**
+*   `--tag [TAG]` / `--no-tag [TAG]`: Include/Exclude series based on tags.
+*   `--genre [GENRE]` / `--no-genre [GENRE]`: Include/Exclude series based on genres.
+*   `--source [CATEGORY]` / `--no-source [CATEGORY]`: Include/Exclude based on current location (Main or Sub category name).
+
+**Actions:**
+*   `--target [DESTINATION]`:
+    *   **Specific (Main/Sub):** (e.g., `Manga/Action`) Direct operation. No AI.
+    *   **Main Only:** (e.g., `Manga`) AI Assisted.
+        *   *Standard:* AI picks sub-category from current library schema restricted to "Manga".
+        *   *Newroot:* AI picks sub-category from **NEW ROOT's** schema (if exists) restricted to "Manga".
+    *   **Omitted:** Full AI.
+        *   *Standard:* AI picks from entire current library schema.
+        *   *Newroot:* AI picks from entire **NEW ROOT's** schema.
+
+**Safety & Overrides:**
+*   `--auto`: Skip confirmation prompts.
+*   `--simulate`: Dry run (Show what would happen without modifying files).
+*   `--newroot [PATH]`: **THE ONLY COPY MODE.** Switches operation from Move to Copy. Content is duplicated to the new path, preserving source.
+
+## 3. Logic Flow
+
+### Phase 1: Setup
+1.  **Scan Library:** standard `run_scan_with_progress`.
+2.  **Determine Mode & Schema:**
+    *   **IF `--newroot` provided:**
+        *   Check if path exists (create if needed/prompt).
+        *   Scan new root folder for existing folder structure to build `custom_schema`.
+        *   Set **Mode = COPY**.
+        *   Set **Base Destination = New Root Path**.
+    *   **ELSE:**
+        *   Set `custom_schema = None`.
+        *   Set **Mode = MOVE**.
+        *   Set **Base Destination = Current Library Path**.
+
+### Phase 2: Filter
+1.  **Load Metadata:** Iterate through all series in library. Load `series.json` (show progress bar).
+2.  **Apply Filters:**
+    *   **Inclusion Logic:** If any inclusion flags (`--tag`, `--genre`, `--source`) are set, the series MUST match *at least one* of them. If no inclusion flags are set, all series are candidates.
+    *   **Exclusion Logic:** If any exclusion flags (`--no-tag`, etc.) are set, the series MUST NOT match *any* of them.
+    *   **Query Logic:** If `[QUERY]` arg is present, series name must match.
+
+### Phase 3: Execution
+1.  **Iterate Candidates:** Loop through filtered list.
+2.  **Determine Target Path:**
+    *   **Case A (Direct):** User provided "Main/Sub". Target is fixed.
+    *   **Case B (AI):** User provided "Main" or nothing.
+        *   Call `suggest_category(series, ..., custom_categories=custom_schema, restrict_to_main=target_main)`.
+        *   Get consensus result.
+        *   Construct target path from result.
+3.  **Perform Operation:**
+    *   **Simulate:** Print "[SIMULATE] Would Move/Copy X to Y".
+    *   **Real:**
+        *   Ensure destination parent exists.
+        *   **IF Mode == COPY:** `shutil.copytree` / `shutil.copy2`.
+        *   **IF Mode == MOVE:** `shutil.move`.
+        *   **Cleanup:** If Move, remove empty source directories.
+
+## 4. Example Scenarios
+
+*   **Standard Cleanup:**
+    `organize --tag "Isekai" --target "Manga"`
+    *   *Action:* **MOVES** all Isekai series to `Manga/[AI-Selected-Sub]` in current drive.
+
+*   **Selective Export:**
+    `organize --newroot "D:/Backups" --genre "Romance"`
+    *   *Action:* **COPIES** all Romance series to `D:/Backups/[AI-Selected-Main]/[AI-Selected-Sub]`. The AI aligns with whatever folder structure exists on D:.
+
+## 5. Relationship with `categorize`
+The `organize` command is designed as a strict superset of the existing `categorize` command.
+*   **Equivalence:** Running `organize --source "Uncategorized"` is functionally identical to running `categorize`.
+*   **Strategy:**
+    1.  Implement `organize` as a standalone "Core Engine".
+    2.  Retain `categorize` as-is for now to ensure stability.
+    3.  Once `organize` is fully tested and verified, `categorize` can be refactored to simply call `organize` with preset arguments (or be deprecated entirely).

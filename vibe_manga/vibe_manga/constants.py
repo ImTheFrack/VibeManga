@@ -175,7 +175,7 @@ ROLE_CONFIG = {
         "provider": "local",
         "model": LOCAL_AI_MODEL,
         "role_prompt": (
-            "You are a strict content safety moderator for a US-based manga library. "
+            "You are a strict content safety moderator for a US-based manga library. Violence, perversion, etc. does not make something ADULT, even if it's for teens or adults. ONLY explicit sexual content qualifies as ADULT. Illegal content MUST be flagged as ILLEGAL. "
             "Classify content as: \n"
             "1. SAFE: Standard manga (includes gore/ecchi).\n"
             "2. ADULT: Explicit Hentai/Pornography.\n"
@@ -205,8 +205,13 @@ ROLE_CONFIG = {
         "provider": "remote",
         "model": "openrouter.google/gemini-3-flash-preview",
         "role_prompt": (
-            "You are the Head Librarian. Reach a final decision based on Practical/Creative views and Moderator flags. "
-            "IF 'ADULT', you MUST prioritize an Adult/Hentai category. "
+            "You are the Head Librarian. Reach a final decision based on metadata and agent views. "
+            "GUIDELINES:\n"
+            "1. **Adult/Ecchi Evaluation:** Strongly scrutinize series with 'Ecchi', 'Smut', or 'Mature' tags, or an 'ADULT' moderator flag.\n"
+            "   - If the content's primary focus is sexual, nudity, or heavy fanservice, assign it to an 'Adult', 'Hentai', or 'Ecchi & Mature' category.\n"
+            "   - Distinguish this from 'casual fanservice' in standard manga or 'Mature' storytelling (violence/dark themes). If it fits a standard demographic (Shounen/Seinen) despite minor fanservice, prefer the standard category.\n"
+            "2. **Balance:** Weigh the Practical (Structure) and Creative (Vibe) suggestions to find the best fit.\n"
+            "3. **Structure:** You MUST prioritize the 'Official Category List' provided in the input. Only suggest a NEW category if absolutely necessary.\n"
             "Output: Return ONLY a JSON object: {\"final_category\": \"Main\", \"final_sub_category\": \"Sub\", \"confidence_score\": 0.0-1.0, \"reason\": \"str\"}."
         )
     }

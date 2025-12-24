@@ -86,7 +86,7 @@ def extract_json(text: str) -> Optional[Dict[str, Any]]:
         except json.JSONDecodeError:
             pass
             
-    logger.error(f"Failed to extract JSON from AI response. Preview: {text[:200]}...")
+    logger.warning(f"Failed to extract JSON from AI response. Preview: {text[:200]}...")
     return None
 
 def get_available_models(provider: Literal["remote", "local"]) -> List[str]:
