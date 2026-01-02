@@ -480,7 +480,8 @@ def cli():
 @click.option("--trust", "trust_jikan", is_flag=True, help="Trust Jikan if name is perfect match (skips AI Supervisor).")
 @click.option("--all", "process_all", is_flag=True, help="Process all series in the library.")
 @click.option("--model-assign", is_flag=True, help="Configure AI models for specific roles before running.")
-def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, process_all: bool, model_assign: bool) -> None:
+@click.option("--parallel", type=click.IntRange(1, 10), default=1, help="Number of parallel threads to use (Default: 1).")
+def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, process_all: bool, model_assign: bool, parallel: int) -> None:
     """
     Fetches and saves metadata (genres, authors, status) for series.
     Creates a 'series.json' file in each series directory.
@@ -490,7 +491,7 @@ def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, proces
         if not query and not process_all:
              return
 
-    logger.info(f"Metadata command started (query={query}, force={force_update}, all={process_all}, trust={trust_jikan})")
+    logger.info(f"Metadata command started (query={query}, force={force_update}, all={process_all}, trust={trust_jikan}, parallel={parallel})")
     
     if not query and not process_all:
         console.print("[yellow]Please provide a series name query or use --all to process the entire library.[/yellow]")
@@ -529,6 +530,9 @@ def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, proces
     table.add_column("Genres/Tags", style="dim")
     table.add_column("Authors", style="cyan")
     
+    from threading import Lock
+    table_lock = Lock()
+
     # Progress Layout
     progress = Progress(
         SpinnerColumn(),
@@ -544,50 +548,77 @@ def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, proces
     with Live(display_group, console=console, refresh_per_second=PROGRESS_REFRESH_RATE):
         task = progress.add_task("[green]Processing metadata...", total=len(targets))
         
-        for series in targets:
-            progress.update(task, description=f"[green]Fetching: {series.name}[/green]")
-            detail_text.plain = "  → Starting..."
+        def process_one_series(series: Series) -> None:
+            """Helper function for processing a single series."""
+            # Define callback: Only use if running single-threaded to avoid UI race conditions
+            # If parallel > 1, we rely on the main loop to update general status
+            local_callback = None
             
-            def update_detail(msg: str):
-                detail_text.plain = ""
-                detail_text.append("  → ")
-                if "[" in msg and "]" in msg:
-                    detail_text.append(Text.from_markup(msg))
-                else:
-                    detail_text.append(msg)
-
+            if parallel == 1:
+                progress.update(task, description=f"[green]Fetching: {series.name}[/green]")
+                
+                def update_detail(msg: str):
+                    detail_text.plain = ""
+                    detail_text.append("  → ")
+                    if "[" in msg and "]" in msg:
+                        detail_text.append(Text.from_markup(msg))
+                    else:
+                        detail_text.append(msg)
+                local_callback = update_detail
+            
             try:
                 meta, source = get_or_create_metadata(
                     series.path, 
                     series.name, 
                     force_update=force_update, 
                     trust_jikan=trust_jikan,
-                    status_callback=update_detail
+                    status_callback=local_callback
                 )
                 
-                # Update status with source
+                # Update status with source (Thread-safe lock for Table)
                 color = "green" if "Trusted" in source or "Local" in source else "cyan" if "Jikan" in source else "magenta"
-                detail_text.plain = ""
-                detail_text.append(Text.from_markup(f"  → [{color}]Completed via {source}[/{color}]"))
-
+                
                 # Add to summary table (limit rows if too many)
                 if len(targets) <= 20 or force_update:
                     genres = ", ".join((meta.genres or [])[:3])
                     authors = ", ".join((meta.authors or [])[:2])
                     status_color = "green" if meta.status == "Completed" else "yellow"
-                    table.add_row(
-                        series.name,
-                        f"[{status_color}]{meta.status}[/{status_color}]",
-                        source,
-                        genres,
-                        authors
-                    )
+                    
+                    with table_lock:
+                        table.add_row(
+                            series.name,
+                            f"[{status_color}]{meta.status}[/{status_color}]",
+                            source,
+                            genres,
+                            authors
+                        )
+                return f"  → [{color}]Completed {series.name} via {source}[/{color}]"
+
             except Exception as e:
                 logger.error(f"Error fetching metadata for {series.name}: {e}")
-                detail_text.plain = ""
-                detail_text.append(Text.from_markup("  → [red]Error occurred[/red]"))
+                return f"  → [red]Error processing {series.name}[/red]"
+
+        # Parallel Execution
+        with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as executor:
+            future_to_series = {executor.submit(process_one_series, s): s for s in targets}
             
-            progress.advance(task)
+            for future in concurrent.futures.as_completed(future_to_series):
+                series = future_to_series[future]
+                try:
+                    result_msg = future.result()
+                    # Update detail text safely in main thread
+                    if result_msg and parallel > 1:
+                        detail_text.plain = ""
+                        detail_text.append(Text.from_markup(result_msg))
+                    elif parallel == 1 and result_msg:
+                        # For single thread, just show final status briefly
+                        detail_text.plain = ""
+                        detail_text.append(Text.from_markup(result_msg))
+                        
+                except Exception as exc:
+                    logger.error(f"Thread exception for {series.name}: {exc}")
+                
+                progress.advance(task)
 
     if table.row_count > 0:
         console.print(table)
@@ -612,6 +643,495 @@ def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, proces
         console.print(report)
 
     console.print(f"[green]Metadata update complete for {len(targets)} series![/green]")
+
+@cli.command()
+@click.option("--force", is_flag=True, help="Force re-check even if MAL ID exists.")
+@click.option("--model-assign", is_flag=True, help="Configure AI models before running.")
+def hydrate(force: bool, model_assign: bool) -> None:
+    """
+    Ensures every series in the library has a valid ID/Metadata.
+    Iterates through the library and fetches metadata for any series missing a MAL ID.
+    """
+    if model_assign:
+        run_model_assignment()
+
+    logger.info(f"Hydrate command started (force={force})")
+    root_path = get_library_root()
+    
+    # 1. Scan Library
+    library = run_scan_with_progress(
+        root_path,
+        "[bold green]Scanning Library for Hydration...",
+        use_cache=True 
+    )
+
+    # 2. Identify Candidates
+    candidates: List[Series] = []
+    
+    def check_series(s: Series):
+        # We check if mal_id is missing (None or 0). 
+        # If 'force' is True, we include it regardless (updates existing).
+        if force or not s.metadata.mal_id:
+            candidates.append(s)
+
+    for cat in library.categories:
+        for sub in cat.sub_categories:
+            for s in sub.series:
+                check_series(s)
+        for s in cat.series:
+            check_series(s)
+
+    if not candidates:
+        console.print("[green]All series are already hydrated (MAL IDs present).[/green]")
+        return
+
+    console.print(f"[cyan]Found {len(candidates)} series needing hydration...[/cyan]")
+
+    # 3. Process Candidates
+    progress = Progress(
+        SpinnerColumn(),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("[progress.description]{task.description}"),
+        console=console
+    )
+    
+    detail_text = Text("", style="dim italic")
+    display_group = Group(progress, detail_text)
+
+    # Stats for summary
+    stats = {"success": 0, "failed": 0, "skipped": 0}
+
+    with Live(display_group, console=console, refresh_per_second=PROGRESS_REFRESH_RATE):
+        task = progress.add_task("[green]Hydrating...", total=len(candidates))
+        
+        for series in candidates:
+            progress.update(task, description=f"[green]Hydrating: {series.name}[/green]")
+            
+            def update_detail(msg: str):
+                detail_text.plain = ""
+                detail_text.append("  → ")
+                if "[" in msg and "]" in msg:
+                    detail_text.append(Text.from_markup(msg))
+                else:
+                    detail_text.append(msg)
+
+            try:
+                # If MAL ID is missing (None or 0), we MUST force update to bypass the local cache check.
+                # Otherwise, it just reloads the existing "empty" series.json and does nothing.
+                should_force = force or not series.metadata.mal_id
+
+                # Call get_or_create_metadata
+                # This automatically attempts Jikan -> AI Supervisor -> AI Fetcher -> Placeholder
+                # And saves to series.json
+                meta, source = get_or_create_metadata(
+                    series.path, 
+                    series.name, 
+                    force_update=should_force,
+                    status_callback=update_detail
+                )
+                
+                # Update In-Memory Object!
+                series.metadata = meta
+                
+                if meta.mal_id:
+                    stats["success"] += 1
+                    console.print(f"  [green]✓[/green] [white]{series.name}[/white] -> [bold cyan]MAL ID: {meta.mal_id}[/bold cyan] [dim]({source})[/dim]")
+                else:
+                    # If we got a placeholder back (no MAL ID), it counts as a partial failure/skip
+                    stats["skipped"] += 1
+                    console.print(f"  [yellow]![/yellow] [white]{series.name}[/white] -> [yellow]No ID Found[/yellow] [dim]({source})[/dim]")
+                
+            except Exception as e:
+                logger.error(f"Error hydrating {series.name}: {e}")
+                stats["failed"] += 1
+                detail_text.plain = f"  → [red]Error: {e}[/red]"
+            
+            progress.advance(task)
+
+    # 4. Final Summary
+    console.print(Rule("[bold magenta]Hydration Complete[/bold magenta]"))
+    console.print(f"Total Processed: {len(candidates)}")
+    console.print(f"[green]Successfully Hydrated (ID Found): {stats['success']}[/green]")
+    console.print(f"[yellow]Placeholder Created (No ID): {stats['skipped']}[/yellow]")
+    if stats['failed'] > 0:
+        console.print(f"[red]Errors: {stats['failed']}[/red]")
+
+    # Save cache to persist the in-memory updates we just made
+    from .cache import save_library_cache
+    save_library_cache(library)
+    console.print("[dim]Library cache updated.[/dim]")
+
+def run_interactive_rename_selection(plan: List, prefer_english: bool = False, prefer_japanese: bool = False) -> Optional[List]:
+    """
+    Interactive TUI to select rename operations.
+    Returns filtered list of operations, or None if aborted.
+    """
+    from .renamer import add_to_whitelist, generate_rename_op_for_series, load_whitelist
+    from .metadata import get_or_create_metadata
+
+    # Track selection by Object identity (ID), not the object itself (unhashable)
+    selected_ids = {id(op) for op in plan} 
+    cursor_idx = 0
+    view_start = 0
+    
+    # Constants for layout
+    DETAIL_HEIGHT = 10
+    STATUS_HEIGHT = 3
+    HEADER_HEIGHT = 4 # Title + Table Header
+    MIN_TABLE_HEIGHT = 5
+    
+    # Use Live display for smooth rendering (no flickering)
+    # screen=True uses alternate screen buffer (restores terminal on exit)
+    with Live(console=console, auto_refresh=False, screen=True) as live:
+        while True:
+            if not plan:
+                live.stop()
+                console.print("[yellow]All items removed/whitelisted.[/yellow]")
+                return []
+
+            # Dynamic Height Calculation
+            term_height = console.size.height
+            # Deduct fixed heights + extra safety buffer (20) to prevent overflow
+            # (Detail=10, Status=3, Header~=4, Buffer=3)
+            view_height = max(MIN_TABLE_HEIGHT, term_height - 20)
+
+            # Scroll Logic
+            if cursor_idx < view_start:
+                view_start = cursor_idx
+            elif cursor_idx >= view_start + view_height:
+                view_start = cursor_idx - view_height + 1
+            
+            # Clamp view_start if list shrunk
+            if view_start > len(plan) - view_height:
+                view_start = max(0, len(plan) - view_height)
+                
+            view_end = min(view_start + view_height, len(plan))
+            
+            # 1. Build Table
+            table = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan", expand=True)
+            table.add_column("Sel", width=4, justify="center")
+            table.add_column("Series Name", ratio=1, no_wrap=True, overflow="ellipsis")
+            table.add_column("Target Name", ratio=1, no_wrap=True, overflow="ellipsis")
+            
+            for i in range(view_start, view_end):
+                if i >= len(plan): break
+                op = plan[i]
+                is_cursor = (i == cursor_idx)
+                is_selected = (id(op) in selected_ids)
+                
+                cursor_char = ">" if is_cursor else " "
+                check_char = "[green]●[/green]" if is_selected else "[dim]○[/dim]"
+                
+                # Highlight row if cursor
+                style = "reverse" if is_cursor else ""
+                
+                # Format Name
+                c_name = op.current_name
+                t_name = op.target_name
+                if c_name != t_name:
+                     t_name = f"[yellow]{t_name}[/yellow]"
+                
+                table.add_row(
+                    f"{cursor_char} {check_char}",
+                    c_name,
+                    t_name,
+                    style=style
+                )
+            
+            # Fill empty rows to maintain height stability
+            rows_filled = view_end - view_start
+            if rows_filled < view_height:
+                for _ in range(view_height - rows_filled):
+                    table.add_row("", "", "")
+
+            # 2. Build Detail Panel
+            current_op = plan[cursor_idx] if plan else None
+            detail_content = Text("No Series Selected", style="dim")
+            
+            if current_op:
+                meta = current_op.series.metadata
+                
+                # Path
+                path_str = str(current_op.series.path)
+                
+                # Genres/Tags
+                genres = ", ".join(meta.genres[:5]) if meta.genres else "N/A"
+                tags = ", ".join(meta.tags[:5]) if meta.tags else "N/A"
+                
+                # Synopsis (Truncate to fit ~4 lines)
+                synopsis = meta.synopsis or "No synopsis available."
+                synopsis = synopsis.replace("\n", " ").strip()
+                if len(synopsis) > 300:
+                    synopsis = synopsis[:297] + "..."
+                
+                detail_grid = Table.grid(padding=(0, 2))
+                detail_grid.add_column(style="bold cyan", width=10)
+                detail_grid.add_column(style="white")
+                
+                detail_grid.add_row("Path:", f"[dim]{path_str}[/dim]")
+                detail_grid.add_row("Genres:", f"[green]{genres}[/green]")
+                detail_grid.add_row("Tags:", f"[blue]{tags}[/blue]")
+                detail_grid.add_row("Synopsis:", f"[italic]{synopsis}[/italic]")
+                
+                detail_content = detail_grid
+
+            detail_panel = Panel(
+                detail_content, 
+                title=f"[bold]Details: {current_op.series.name if current_op else 'None'}[/bold]", 
+                box=box.ROUNDED, 
+                border_style="cyan",
+                height=DETAIL_HEIGHT
+            )
+
+            # 3. Build Status Panel
+            status_text = (
+                f"[bold]Selected: {len(selected_ids)}/{len(plan)}[/bold] | "
+                f"[dim]↑/↓/j/k Move | Space Toggle | w Whitelist | m Force Meta | a All | n None | Enter Proceed | q Quit[/dim]"
+            )
+            status_panel = Panel(status_text, box=box.ROUNDED, border_style="blue", height=STATUS_HEIGHT)
+
+            layout = Group(
+                Rule("[bold magenta]Interactive Rename Selection[/bold magenta]"),
+                table,
+                detail_panel,
+                status_panel
+            )
+            
+            live.update(layout, refresh=True)
+            
+            # 4. Input Handling
+            try:
+                ch = click.getchar()
+            except Exception:
+                continue
+
+            key = ch
+            # Windows Arrow Keys (0x00 or 0xE0 followed by code)
+            if ch == '\xe0' or ch == '\x00':
+                ch2 = click.getchar()
+                if ch2 == 'H': key = 'up'
+                elif ch2 == 'P': key = 'down'
+            # Unix ANSI sequences (ESC [ A/B)
+            elif ch == '\x1b':
+                ch2 = click.getchar()
+                if ch2 == '[':
+                    ch3 = click.getchar()
+                    if ch3 == 'A': key = 'up'
+                    elif ch3 == 'B': key = 'down'
+            
+            # Logic
+            if key in ['q', 'Q']:
+                return None
+            elif key in ['\r', '\n', 'p']: # Enter
+                # Return strictly the selected objects, preserving original order
+                return [op for op in plan if id(op) in selected_ids]
+            elif key in ['up', 'k']:
+                cursor_idx = max(0, cursor_idx - 1)
+            elif key in ['down', 'j']:
+                cursor_idx = min(len(plan) - 1, cursor_idx + 1)
+            elif key == ' ':
+                op = plan[cursor_idx]
+                if id(op) in selected_ids:
+                    selected_ids.remove(id(op))
+                else:
+                    selected_ids.add(id(op))
+            elif key == 'w':
+                # Whitelist Logic
+                op = plan[cursor_idx]
+                add_to_whitelist(op.current_name)
+                
+                # Remove from plan and selection
+                if id(op) in selected_ids:
+                    selected_ids.remove(id(op))
+                plan.pop(cursor_idx)
+                
+                # Adjust cursor
+                if cursor_idx >= len(plan):
+                     cursor_idx = max(0, len(plan) - 1)
+            
+            elif key == 'm':
+                # Force Metadata Update
+                op = plan[cursor_idx]
+                
+                # Stop live to allow console output/prompt
+                live.stop()
+                console.print(f"\n[bold blue]Force Updating Metadata for '{op.series.name}'...[/bold blue]")
+                
+                # Call Metadata (Force=True)
+                new_meta, source = get_or_create_metadata(op.series.path, op.series.name, force_update=True)
+                console.print(f"[green]Metadata Updated via {source}![/green]")
+                console.print(f"Title: {new_meta.title}")
+                
+                # Regenerate Op
+                wl = load_whitelist()
+                new_op = generate_rename_op_for_series(op.series, wl, prefer_english=prefer_english, prefer_japanese=prefer_japanese)
+                
+                if new_op:
+                    # Update Plan
+                    plan[cursor_idx] = new_op
+                    # Update selection if it was selected
+                    if id(op) in selected_ids:
+                        selected_ids.remove(id(op))
+                        selected_ids.add(id(new_op))
+                    console.print(f"[cyan]Rename operation updated: {new_op.target_name}[/cyan]")
+                else:
+                    console.print("[yellow]No rename needed after metadata update (or whitelisted). Removing from plan.[/yellow]")
+                    if id(op) in selected_ids:
+                        selected_ids.remove(id(op))
+                    plan.pop(cursor_idx)
+                    if cursor_idx >= len(plan):
+                        cursor_idx = max(0, len(plan) - 1)
+                
+                console.print("[dim]Press any key to resume...[/dim]")
+                click.getchar()
+                live.start()
+
+            elif key == 'a':
+                selected_ids = {id(op) for op in plan}
+            elif key == 'n':
+                selected_ids.clear()
+            elif key == 'i':
+                new_sel = set()
+                for op in plan:
+                    if id(op) not in selected_ids:
+                        new_sel.add(id(op))
+                selected_ids = new_sel
+
+@cli.command()
+@click.argument("query", required=False)
+@click.option("--english", is_flag=True, help="Prefer English titles (from Metadata).")
+@click.option("--japanese", is_flag=True, help="Prefer Japanese titles (from Metadata).")
+@click.option("--auto", is_flag=True, help="Skip confirmation prompts.")
+@click.option("--simulate", is_flag=True, help="Show preview without applying changes.")
+@click.option("--force", is_flag=True, help="Overwrite destinations (dangerous).")
+@click.option("--level", type=click.IntRange(1, 3), default=3, help="Safety Level (1=Trivial, 2=Safe/Fuzzy, 3=Aggressive). Default: 3")
+@click.option("--interactive", is_flag=True, help="Interactively select items to rename.")
+def rename(query: Optional[str], english: bool, japanese: bool, auto: bool, simulate: bool, force: bool, level: int, interactive: bool) -> None:
+    """
+    Standardizes folder and file names based on metadata.
+    Renames the series folder to match the canonical title.
+    Renames files inside to match the [Series] [Type] convention.
+    Converts .zip/.rar extensions to .cbz/.cbr.
+    """
+    logger.info(f"Rename command started (query={query}, en={english}, jp={japanese}, auto={auto}, sim={simulate}, level={level})")
+    
+    root_path = get_library_root()
+    library = run_scan_with_progress(
+        root_path,
+        "[bold green]Scanning for Renames...",
+        use_cache=False # Always fresh scan for file operations
+    )
+
+    from .renamer import generate_rename_plan, execute_rename_op
+    
+    with console.status("[bold blue]Generating Rename Plan..."):
+        full_plan = generate_rename_plan(library, query, prefer_english=english, prefer_japanese=japanese)
+
+    # Filter by level
+    plan = [op for op in full_plan if op.safety_level <= level]
+    skipped = len(full_plan) - len(plan)
+
+    if not plan:
+        console.print("[green]Library is already standardized! No renames needed.[/green]")
+        if skipped > 0:
+            console.print(f"[dim](Skipped {skipped} operations due to Safety Level limit {level})[/dim]")
+        return
+
+    # Interactive Mode
+    if interactive and not auto:
+        selection = run_interactive_rename_selection(plan, prefer_english=english, prefer_japanese=japanese)
+        if selection is None:
+            console.print("[yellow]Aborted.[/yellow]")
+            return
+        plan = selection
+        if not plan:
+            console.print("[yellow]No items selected (or all whitelisted).[/yellow]")
+            return
+        # Skip standard table if we just did interactive
+        
+    else:
+        # Standard Preview Table
+        table = Table(title=f"Rename Plan ({len(plan)} Series)", box=box.ROUNDED)
+        table.add_column("Lvl", style="cyan", width=3)
+        table.add_column("Current Name", style="dim")
+        table.add_column("Target Name", style="bold green")
+        table.add_column("File Ops", justify="right")
+        table.add_column("Path", style="dim", max_width=40, overflow="ellipsis")
+
+        for op in plan:
+            file_count = len(op.file_ops)
+            f_txt = f"{file_count} files" if file_count > 0 else "-"
+            
+            # Color code level
+            lvl_color = "green" if op.safety_level == 1 else "yellow" if op.safety_level == 2 else "red"
+            
+            table.add_row(
+                f"[{lvl_color}]{op.safety_level}[/{lvl_color}]", 
+                op.current_name, 
+                op.target_name, 
+                f_txt, 
+                str(op.current_path)
+            )
+
+        console.print(table)
+        
+        if skipped > 0:
+            console.print(f"[yellow]Note: {skipped} aggressive renames were hidden/skipped by --level {level}[/yellow]")
+    
+    if simulate:
+        console.print("[yellow][SIMULATION] No changes made.[/yellow]")
+        return
+
+    # Confirm (Only if NOT interactive, because interactive already had explicit "Proceed")
+    if not auto and not interactive:
+        if not click.confirm(f"Proceed with renaming {len(plan)} series?"):
+            console.print("[yellow]Aborted.[/yellow]")
+            return
+
+    # Execute
+    success_count = 0
+    fail_count = 0
+    
+    with Progress(
+        SpinnerColumn(),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("{task.description}"),
+        console=console
+    ) as progress:
+        task = progress.add_task("[green]Renaming...", total=len(plan))
+        
+        for op in plan:
+            progress.update(task, description=f"Renaming: {op.current_name} -> {op.target_name}")
+            
+            # Check collision (unless force)
+            if not force and op.target_path.exists() and op.target_path != op.current_path:
+                console.print(f"[red]Skipping {op.current_name}: Target exists ({op.target_path})[/red]")
+                fail_count += 1
+                progress.advance(task)
+                continue
+                
+            msgs = execute_rename_op(op)
+            
+            # Check for error messages
+            errors = [m for m in msgs if "ERROR" in m]
+            if errors:
+                fail_count += 1
+                for e in errors:
+                    console.print(f"[red]{e}[/red]")
+            else:
+                success_count += 1
+                
+            progress.advance(task)
+
+    console.print(Rule("[bold magenta]Rename Complete[/bold magenta]"))
+    console.print(f"[green]Success: {success_count}[/green] | [red]Failed/Skipped: {fail_count}[/red]")
+    
+    # Save cache (paths changed!)
+    from .cache import save_library_cache
+    save_library_cache(library)
+    console.print("[dim]Library cache updated.[/dim]")
 
 def manual_select_category(library: Library) -> Optional[Tuple[str, str]]:
     """Interactive manual category selection helper."""
@@ -1818,6 +2338,12 @@ def show(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
             meta_table.add_column(style="bold cyan")
             meta_table.add_column()
             
+            if meta.title_english and meta.title_english.lower() != series.name.lower():
+                meta_table.add_row("English Title:", meta.title_english)
+            if meta.title_japanese:
+                meta_table.add_row("Japanese Title:", meta.title_japanese)
+            if meta.synonyms:
+                meta_table.add_row("Synonyms:", ", ".join(meta.synonyms[:5]))
             if meta.authors:
                 meta_table.add_row("Authors:", ", ".join(meta.authors))
             if meta.release_year:
@@ -1826,14 +2352,19 @@ def show(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
                 status_color = "green" if meta.status == "Completed" else "yellow"
                 meta_table.add_row("Status:", f"[{status_color}]{meta.status}[/{status_color}]")
             if meta.genres:
-                meta_table.add_row("Genres:", ", ".join(meta.genres[:5]))
+                meta_table.add_row("Genres:", ", ".join(meta.genres[:8]))
+            if meta.tags:
+                meta_table.add_row("Tags:", ", ".join(meta.tags[:10]))
             
-            # External Links
+            # External IDs & Links
             links = []
-            if meta.mal_id: links.append(f"[blue][link=https://myanimelist.net/manga/{meta.mal_id}]MAL[/link][/blue]")
-            if meta.anilist_id: links.append(f"[blue][link=https://anilist.co/manga/{meta.anilist_id}]AniList[/link][/blue]")
+            if meta.mal_id: 
+                links.append(f"MAL: [bold]{meta.mal_id}[/bold] [dim]([link=https://myanimelist.net/manga/{meta.mal_id}]Visit[/link])[/dim]")
+            if meta.anilist_id: 
+                links.append(f"AniList: [bold]{meta.anilist_id}[/bold] [dim]([link=https://anilist.co/manga/{meta.anilist_id}]Visit[/link])[/dim]")
+            
             if links:
-                meta_table.add_row("Links:", " | ".join(links))
+                meta_table.add_row("Identifiers:", " | ".join(links))
 
             content_elements.append(meta_table)
             

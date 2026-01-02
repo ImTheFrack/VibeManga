@@ -2,49 +2,22 @@ import json
 import logging
 import time
 import requests
+import difflib
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Union, Tuple
 
 from .constants import ROLE_CONFIG, REMOTE_AI_API_KEY, AI_MAX_RETRIES
 from .ai_api import call_ai
 from .config import get_role_config
 from .analysis import semantic_normalize
+from .models import SeriesMetadata
 
 logger = logging.getLogger(__name__)
 
 # Jikan API constants
 JIKAN_BASE_URL = "https://api.jikan.moe/v4"
 JIKAN_RATE_LIMIT_DELAY = 1.2  # Increased to 1.2s to be safer
-
-@dataclass
-class SeriesMetadata:
-    """
-    Standardized schema for manga metadata.
-    saved to series.json in each series folder.
-    """
-    title: str = "Unknown"
-    authors: List[str] = field(default_factory=list)
-    synopsis: str = ""
-    genres: List[str] = field(default_factory=list)
-    tags: List[str] = field(default_factory=list)
-    demographics: List[str] = field(default_factory=list)
-    status: str = "Unknown" # Completed, Ongoing, Hiatus, Cancelled
-    total_volumes: Optional[int] = None
-    total_chapters: Optional[int] = None
-    release_year: Optional[int] = None
-    mal_id: Optional[int] = None
-    anilist_id: Optional[int] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'SeriesMetadata':
-        # Filter unknown keys to prevent init errors if schema changes
-        valid_keys = cls.__annotations__.keys()
-        filtered_data = {k: v for k, v in data.items() if k in valid_keys}
-        return cls(**filtered_data)
 
 def load_local_metadata(series_path: Path) -> Optional[SeriesMetadata]:
     """Loads metadata from series.json in the series directory."""
@@ -71,10 +44,16 @@ def save_local_metadata(series_path: Path, metadata: SeriesMetadata) -> bool:
         logger.error(f"Failed to save metadata to {meta_path}: {e}")
         return False
 
+def calculate_similarity(query: str, candidate: str) -> float:
+    """Calculates similarity ratio between query and candidate."""
+    if not query or not candidate:
+        return 0.0
+    return difflib.SequenceMatcher(None, query, candidate).ratio()
+
 def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> Optional[SeriesMetadata]:
     """
     Searches Jikan (MAL) for manga metadata.
-    Returns the first best match or None.
+    Returns the best matching result based on similarity score.
     """
     for attempt in range(AI_MAX_RETRIES + 1):
         try:
@@ -86,7 +65,7 @@ def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> 
             search_url = f"{JIKAN_BASE_URL}/manga"
             params = {
                 "q": query,
-                "limit": 10,  # Fetch more to find a better match
+                "limit": 15,  # Fetch more to find a better match
                 "sfw": "false" # Include mature content since we are a manga library
             }
             
@@ -107,26 +86,56 @@ def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> 
             if not results:
                 return None
                 
-            # Try to find the best match semantically
             norm_query = semantic_normalize(query)
-            best_match = None
+            scored_results = []
             
             for res in results:
-                # Check all possible titles Jikan provides
-                candidate_titles = [res.get("title"), res.get("title_english"), res.get("title_japanese")]
-                # Also check the 'titles' list if available
+                # Collect all possible titles
+                candidates = set()
+                if res.get("title"): candidates.add(res.get("title"))
+                if res.get("title_english"): candidates.add(res.get("title_english"))
+                if res.get("title_japanese"): candidates.add(res.get("title_japanese"))
                 for t_obj in res.get("titles", []):
-                    candidate_titles.append(t_obj.get("title"))
+                    if t_obj.get("title"): candidates.add(t_obj.get("title"))
                 
-                for cand in candidate_titles:
-                    if cand and semantic_normalize(cand) == norm_query:
-                        best_match = res
-                        break
-                if best_match:
-                    break
+                # Find best score for this result
+                max_score = 0.0
+                best_match_title = ""
+                
+                for cand in candidates:
+                    # Score 1: Normalized semantic match (aggressive)
+                    norm_cand = semantic_normalize(cand)
+                    score_norm = calculate_similarity(norm_query, norm_cand)
+                    
+                    # Score 2: Raw match (less aggressive, catches specific punctuation/subtitle nuances)
+                    # Use lower() to be case insensitive but keep punctuation
+                    score_raw = calculate_similarity(query.lower(), cand.lower())
+                    
+                    score = max(score_norm, score_raw)
+                    
+                    if score > max_score:
+                        max_score = score
+                        best_match_title = cand
+                        
+                scored_results.append((max_score, res, best_match_title))
+                
+            # Sort by score descending
+            scored_results.sort(key=lambda x: x[0], reverse=True)
             
-            # Fallback to the first result if no perfect semantic match found
-            result = best_match or results[0]
+            if not scored_results:
+                return None
+                
+            best_score, best_result, match_title = scored_results[0]
+            
+            logger.info(f"Jikan Best Match: '{match_title}' (Score: {best_score:.2f}) for query '{query}'")
+            if status_callback:
+                status_callback(f"Best match: {match_title} ({best_score:.0%})")
+                
+            # Optional: Threshold check? 
+            # If the best score is very low (e.g. < 0.4), maybe return None?
+            # For now, we trust the relative ranking, but let Supervisor check it.
+            
+            result = best_result
             
             # Parse Jikan format into our schema
             authors = [a["name"] for a in result.get("authors", [])]
@@ -145,8 +154,23 @@ def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> 
             raw_status = result.get("status", "Unknown")
             status = status_map.get(raw_status, raw_status)
 
+            # Extract titles
+            main_title = result.get("title_english") or result.get("title", query)
+            t_eng = result.get("title_english")
+            t_jp = result.get("title_japanese")
+            
+            # Synonyms
+            syns = []
+            for t_obj in result.get("titles", []):
+                t_val = t_obj.get("title")
+                if t_val and t_val not in [main_title, t_eng, t_jp]:
+                    syns.append(t_val)
+
             return SeriesMetadata(
-                title=result.get("title_english") or result.get("title", query),
+                title=main_title,
+                title_english=t_eng,
+                title_japanese=t_jp,
+                synonyms=syns,
                 authors=authors,
                 synopsis=result.get("synopsis", ""),
                 genres=genres,
@@ -156,7 +180,8 @@ def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> 
                 total_volumes=result.get("volumes"),
                 total_chapters=result.get("chapters"),
                 release_year=result.get("published", {}).get("prop", {}).get("from", {}).get("year"),
-                mal_id=result.get("mal_id")
+                mal_id=result.get("mal_id"),
+                anilist_id=None # Jikan is MAL only
             )
             
         except Exception as e:
@@ -337,4 +362,3 @@ def get_or_create_metadata(
     empty = SeriesMetadata(title=series_name)
     save_local_metadata(series_path, empty)
     return empty, "None"
-

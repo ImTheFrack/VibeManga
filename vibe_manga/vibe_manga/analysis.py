@@ -209,10 +209,18 @@ def sanitize_filename(name: str) -> str:
     """
     Sanitizes a string for use as a directory or filename.
     Replaces illegal characters (| : ? * < > " / \\) with full-width equivalents.
+    Moves leading articles (The, An, A, etc.) to the end.
     """
     if not name:
         return "Unknown"
     
+    # Move articles to end BEFORE sanitizing
+    # Matches "The Legend of Zelda" -> "Legend of Zelda, The"
+    article_pat = r"^(The|An|A|Le|La|Les|Un|Une|De|Die|Der|Das|El|Los|Las)\s+(.*)$"
+    match = re.match(article_pat, name, re.IGNORECASE)
+    if match:
+        name = f"{match.group(2)}, {match.group(1)}"
+
     replacements = {
         "|": "｜", ":": "：", "?": "？", "*": "＊", 
         "<": "＜", ">": "＞", "\"": "＂", "/": "／", "\\": "＼"
@@ -249,6 +257,43 @@ def semantic_normalize(name: str) -> str:
     name = re.sub(r"[^a-zA-Z0-9]", "", name)
     # 4. Lowercase
     return name.lower()
+
+def calculate_rename_safety(current: str, target: str) -> int:
+    """
+    Determines the safety level of a rename operation.
+    Level 1: Trivial (Case, punctuation, spacing changes only).
+    Level 2: Moderate (Article moves, minor fuzzy matches).
+    Level 3: Aggressive (Word changes, substring matches, Anthology removal).
+    """
+    if current == target:
+        return 1
+        
+    c_norm = semantic_normalize(current)
+    t_norm = semantic_normalize(target)
+    
+    # Level 1: Semantic Match (only punctuation/case/spacing/articles differs)
+    # Since semantic_normalize strips articles, "The Series" and "Series, The" will match here.
+    if c_norm == t_norm:
+        return 1
+        
+    # Level 3 Checks (Dangerous)
+    # Check for "Anthology" removal or addition (High risk of merging distinct series)
+    if "anthology" in c_norm and "anthology" not in t_norm:
+        return 3
+    if "anthology" not in c_norm and "anthology" in t_norm:
+        return 3
+        
+    # Check for Substring containment (e.g., "Attack on Titan" vs "Attack on Titan Anthology")
+    # If one is a substring of the other (and length diff is significant), it's dangerous.
+    if c_norm in t_norm or t_norm in c_norm:
+        return 3
+
+    # Check Similarity Ratio for typos or small word changes
+    ratio = difflib.SequenceMatcher(None, c_norm, t_norm).ratio()
+    if ratio > 0.8:
+        return 2 # Fuzzy / Minor Typo fix
+        
+    return 3 # Completely different names
 
 def find_gaps(series: Series) -> List[str]:
     all_volumes = []

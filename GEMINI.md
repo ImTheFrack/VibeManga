@@ -1,106 +1,89 @@
 # VibeManga - Project Context
 
 ## Overview
-VibeManga is a Python-based CLI tool designed to manage, analyze, and organize a large, locally stored manga library. It is designed to handle thousands of series and terabytes of data efficiently using parallel processing.
+VibeManga is a Python-based CLI tool designed to manage, analyze, and organize a large, locally stored manga library. It handles thousands of series and terabytes of data efficiently using parallel processing and metadata-driven organization.
 
 ## Tech Stack
 - **Language**: Python 3.x
 - **CLI Framework**: `click`
 - **UI/Visuals**: `rich` (Tables, Trees, Progress Bars)
-- **Concurrency**: `concurrent.futures` (ThreadPoolExecutor) for I/O-bound scanning.
+- **Concurrency**: `concurrent.futures` (ThreadPoolExecutor) for I/O-bound scanning and matching.
 - **Config**: `python-dotenv`
 
 ## Architecture
 
-### 1. Data Models (`models.py`)
-The project enforces a strict hierarchical data structure using Python `dataclasses`:
-*   **Library**: The root container. Supports JSON serialization.
-*   **Category** (Recursive): Represents both "Main" and "Sub" categories.
-*   **Series**: The actual manga title. Includes `external_data` field for storing metadata (e.g. torrent links).
-*   **SubGroup**: Optional sub-folders within a series.
-*   **Volume**: The leaf nodes. Includes `mtime` and `size_bytes` for change detection.
+### Metadata Source-of-Truth Refactor
 
-All models implement `to_dict()` and `from_dict()` for persistent storage in `vibe_manga_library.json`.
+VibeManga’s architecture revolves around a four-phase overhaul that elevated metadata above folder names:
 
-### 2. The Scanner (`scanner.py`)
-*   **Logic**: Custom 4-level depth scanner: `Root -> Main Category -> Sub Category -> Series`.
-*   **Incremental Scanning**: Reuses data from the persistent state if a file's `mtime` and `size` haven't changed.
-*   **Parallelism**: Uses `ThreadPoolExecutor` for deep file scanning.
-*   **Progress**: Real-time progress bar with detailed statistics.
+1. **Phase 1 – Models & Indexer**
+    * `Series.metadata` is now a strongly typed `SeriesMetadata` object populated during scans.
+    * `Series.identities` exposes folder name, English & Japanese titles, and synonyms to the rest of the system.
+    * `LibraryIndex` builds `mal_id_map` and `title_map` structures so lookups can resolve by MAL ID or normalized synonyms instantly.
 
-### 3. Analysis Engine (`analysis.py`)
-*   **Unit Classification**: Distinguishes between Volumes (`vXX`) and Chapters (`cXX`).
-*   **Dual Extraction**: Single files can contribute to both volume and chapter counts.
-*   **Semantic Normalization**: A robust `semantic_normalize` utility that aggressively strips articles ("The", "A"), tags, punctuation, and whitespace for cross-platform title matching.
-*   **Deduplication**: Uses semantic normalization and fuzzy matching for finding structural and file-level duplicates.
-*   **Utility Layer**: Consolidated `parse_size` and `format_size` functions used system-wide for consistent byte handling.
+2. **Phase 2 – Hydration Pipeline**
+    * `scanner.py` rehydrates metadata from `series.json` and the `hydrate` command fills gaps by invoking Jikan + AI fallback.
+    * Every series gains a persistent MAL ID, making downstream operations deterministic.
 
-### 4. Persistence & Caching (`cache.py`)
-...
-### 5. Manga Matcher & Parser (`matcher.py`)
-A robust parsing engine that normalizes filenames into structured metadata.
-*   **Integration**: Results from the `match` command (like torrent magnets) are integrated directly into the `Series.external_data` field in the persistent library state.
-*   **Dual-Layer Matching**: Checks for existing matches in the output file and library before performing new matches.
-*   **Semantic Matching**: Employs `semantic_normalize` to ensure titles like "The 100 Girlfriends" correctly match library entries named "100 Girlfriends, The".
-*   **Shared Logic**: Utilizes central size parsing to enforce `UNDERSIZED` filters (Min Vol: 35MB, Min Chap: 4MB).
+3. **Phase 3 – Matcher Integration**
+    * `matcher.py` consumes the `LibraryIndex`, attempting exact MAL ID matches first, then synonym hits, and finally fuzzy scoring across every identity string.
+    * This approach matches torrents like “Shingeki no Kyojin” to “Attack on Titan” even if the filesystem disagrees.
 
-### 6. Grabber & qBittorrent Integration (`grabber.py`)
-Handles the interactive selection and acquisition of manga.
-*   **Comparison Logic**: Automatically compares scraped torrent content against local library state.
-*   **New Content Detection**: Identifies specifically which volumes or chapters are missing from the local collection.
-*   **Size Heuristics**: Flags `LARGER CONTENT` (potential quality upgrade or undetected batches) and `SMALLER CONTENT` based on library-to-torrent size deltas.
-*   **Navigation**: Supports index-based navigation through consolidated manga groups.
-*   **qBit API**: Direct integration via `qbit_api.py` for headless torrent management.
+4. **Phase 4 – Rename & Standardization**
+    * `rename` (and future `organize`) use hydrated metadata to rename folders/files to canonical titles, preventing regressions back to path-based identity.
+    * Supports preview (`--simulate`), multilingual preferences, and collision-safe renames.
 
-#### Classification Logic
-The matcher assigns a `Type` to each entry:
-1.  **Manga**: The target content.
-2.  **Light Novel**: Filtered via regex (`light\s*novel`, `ln`, `j-novel`, `web\s*novel`, `som\s*kanzenban`).
-3.  **Visual Novel**: Filtered via regex (`visual\s*novel`, `vn`).
-4.  **Audiobook**: Filtered via regex.
-5.  **Anthology**: Filtered via regex (`archives\s*[a-z]-[a-z]`).
-6.  **Periodical**: Weekly magazine releases filtered via (`weekly`, `alpha manga`).
-7.  **UNDERSIZED**: A "Manga" entry that fails validation thresholds (Min Vol: 35MB, Min Chap: 4MB).
+### Subsystems
 
-#### Parsing Rules (Priority Order)
-1.  **Tags**: Extracts `[...]`, `(...)`, `{...}` and moves them to `notes`.
-2.  **Name Stripping**: Removes specific noise strings ("Special Issue", "Complete Edition", etc.).
-3.  **Masking**: Protects specific tokens ("Part XX", "Kaiju No. 8") from number extraction.
-4.  **Mapping**: Parses `X as vY` (Chapters mapping to Volumes).
-5.  **Messy Volumes**: Detects complex tokens (e.g., `v045v4_v086-v087`) to extract the final semantic range.
-6.  **Standard Volumes**: `v01`, `Vol. 1`, `Parts 1-6`.
-7.  **Chapters**: `c01`, `Ch. 1`, `Chapter 1`.
-8.  **Naked Numbers**: Recursively identifies valid number ranges at the end of the string (e.g. `+ 168.1, 255-271`) as chapters.
+**1. Data Models (`models.py`)**
+* `Library`, `Category`, `Series`, and `Volume` dataclasses with JSON serialization.
+* `Series.metadata` (Source of Truth) and `Series.identities` feed the indexer and matcher.
 
-#### Edge Cases Handled
-*   **Dual Language**: Splits `English | Native` or `English [Native]` titles.
-*   **Trailing Noise**: Cleans up separators (`-`, `+`) left behind after extracting numbers.
-*   **False Ranges**: Ignores `77-2` (start > end).
-*   **Partial Updates**: Handles `v01-05 + c06-10` mixed formats.
-*   **Kaiju No. 8**: Specifically prevented from parsing "8" as a chapter.
+**2. Scanner (`scanner.py`)**
+* Depth-aware traversal (`Root → Main → Sub → Series`).
+* Incremental scanning keyed off `mtime`/`size`.
+* Metadata hydration hook that reads/writes `series.json` per folder.
+
+**3. Analysis (`analysis.py`)**
+* Semantic normalization utilities used by the matcher, deduper, and indexer.
+* Volume/Chapter classification and structural duplicate detection.
+
+**4. Indexer (`indexer.py`)**
+* `LibraryIndex.build` populates MAL ID and synonym maps from the scanner output.
+* `search()` performs normalized lookups for titles and synonyms.
+
+**5. Matcher (`matcher.py`)**
+* Normalizes torrent filenames, extracts MAL IDs when present, and resolves to Series objects via the indexer.
+* Falls back to broadened fuzzy comparisons only when deterministic steps fail.
+
+**6. Renamer (`renamer.py`)**
+* Generates rename plans to align filesystem names with metadata titles.
+* Handles `.zip/.rar` → `.cbz/.cbr` normalization and standard volume numbering.
+
+**7. Grabber/qBit Integration (`grabber.py`)**
+* Compares scrape results to library state, highlights missing content, and submits torrents to qBittorrent via API.
 
 ## Key Conventions
 
 ### Regex & Parsing
 The project uses complex regex patterns to handle the wide variety of manga naming conventions.
 1.  **Verbose Mode**: All complex regexes MUST use `re.VERBOSE` to allow for comments and readability.
-2.  **Hex Escaping**: The `#` character is a comment starter in verbose mode. To match a literal hash (e.g., `#1`), you **MUST** use `\x23`. Failing to do so causes syntax errors.
+2.  **Hex Escaping**: The `#` character is a comment starter in verbose mode. To match a literal hash (e.g., `#1`), you **MUST** use `\x23`.
 3.  **Noise Stripping**: We strictly strip years `(2021)`, version tags `[v2]`, and season markers `Season 1` *before* parsing numbers.
-4.  **Priority**: Ranges (`v01-05`) are prioritized over single numbers (`v01`) in regex groups to prevent partial matches.
 
 ### Directory Structure
-The logic *heavily* relies on the folder structure being `Category/SubCategory/Series/`. Deviations from this depth may result in data being missed or miscategorized.  Manga is preferred to be stored as a string composed of the following elements:
-  a. {Series} A sanitized name, ending with articles (The, An, Le, etc.), e.g. "One Piece" or "Lucky Man, The"
-  b. {vXX}: two digits of the volume number prefaced by v, e.g. "v01" v99"
-  c. {XXX[.X]): three digits of the chapter number with no preface, e.g. "001", "020.5", "199"}
+The logic *heavily* relies on the folder structure being `Category/SubCategory/Series/`. Deviations from this depth may result in data being missed or miscategorized.
+
 ## Current Commands
-*   `stats`: Scans the library and shows high-level metrics, category breakdowns, and optional continuity checks (`--continuity`).
-*   `tree --depth [n]`: Visualizes the folder hierarchy.
-*   `show [name]`: Searches for a specific series and shows detailed stats, gaps, and external updates.
-*   `dedupe [name]`: Scans for duplicate files and structural duplicates.
+*   `stats`: Scans the library and shows high-level metrics.
+*   `tree`: Visualizes the folder hierarchy.
+*   `show`: Searches for a specific series and shows detailed stats, gaps, and external updates.
+*   `dedupe`: Scans for duplicate files and structural duplicates.
 *   `scrape`: Scrapes Nyaa.si for latest releases.
-*   `match`: Integrates scraped data with library metadata.
+*   `match`: Parsers scraped data and matches against the library using the Indexer.
 *   `grab`: Interactively select and add torrents to qBittorrent.
+*   `hydrate`: Fetches metadata (MAL ID, Titles) for series missing it.
+*   `rename`: Standardizes folder/file names based on metadata.
 
 ## Roadmap
-See `TODO.md` for active tasks. Next big steps involve "Deep Content Analysis" (archive inspection for page counts/corruption).
+See `TODO.md` for active tasks. Next steps involve "Deep Content Analysis" (archive inspection for page counts/corruption).

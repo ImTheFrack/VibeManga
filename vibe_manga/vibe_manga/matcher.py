@@ -21,6 +21,7 @@ from rich.align import Align
 from . import constants as c
 from .scanner import scan_library
 from .models import Series, Library
+from .indexer import LibraryIndex
 from .analysis import (
     find_gaps, 
     find_duplicates, 
@@ -34,7 +35,7 @@ from .analysis import (
 )
 from .cache import get_cached_library, save_library_cache
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) 
 console = Console()
 
 # --- CONSTANTS & PATTERNS ---
@@ -74,7 +75,7 @@ NAME_STRIP_PATTERNS = [
     r"\s*-manuscriptus",
     r"\s*English\b",
     # Specific Edition Stripping (Parens/Brackets/Braces with "Edition")
-    r"[\\\[\(\{].*?Edition[\\\]\}\\]",
+    r"[\\\\[\(\{].*?Edition[\\\\]\}\]",
     # Generic Trailing Edition (e.g. "- Brilliant Full Color Edition")
     r"\s*-\s*.*?Edition\s*$"
 ]
@@ -129,16 +130,14 @@ def _get_count(start: Optional[str], end: Optional[str]) -> int:
     except (ValueError, TypeError):
         return 1
 
-def match_single_entry(entry: Dict[str, Any], library_series_data: List[Tuple[str, str, str]], existing_match: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def match_single_entry(entry: Dict[str, Any], library_index: Optional[LibraryIndex], existing_match: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Worker function to process a single entry.
-    library_series_data is a list of (name, path, normalized_name).
+    library_index is a LibraryIndex object containing mappings for ID and Titles.
     """
     parsed = parse_entry(entry)
     
     # Restore existing match data if available
-    magnet = parsed.get("magnet_link") or entry.get("magnet_link")
-    
     if existing_match:
         if "grab_status" in existing_match:
             parsed["grab_status"] = existing_match["grab_status"]
@@ -150,48 +149,63 @@ def match_single_entry(entry: Dict[str, Any], library_series_data: List[Tuple[st
             return parsed
 
     is_manga = parsed.get("type") == "Manga"
-    if not is_manga or not library_series_data:
+    if not is_manga or not library_index:
         return parsed
 
     # Matching Logic
-    best_match = None
-    for name in parsed.get("parsed_name", []):
-        norm_name = semantic_normalize(name)
-        if not norm_name: continue
+    best_series: Optional[Series] = None
+    
+    # Strategy 1: Direct ID Match (if entry has a known ID)
+    # NOTE: Scrapers might not provide this yet, but we support it for future-proofing.
+    if parsed.get("mal_id"):
+        best_series = library_index.get_by_id(parsed["mal_id"])
+        if best_series:
+            logger.debug(f"Direct ID match for {parsed['mal_id']}: {best_series.name}")
 
-        # 1. Exact Match (Normalized)
-        for s_name, s_path, s_norm in library_series_data:
-            if s_norm == norm_name:
-                best_match = (s_name, s_path)
+    # Strategy 2: Synonym/Title Match via Index
+    if not best_series:
+        for name in parsed.get("parsed_name", []):
+            matches = library_index.search(name)
+            if matches:
+                # If multiple exact title matches, take the first one (ambiguity is rare for full titles)
+                best_series = matches[0]
                 break
+    
+    # Strategy 3: Fuzzy Match (Fallback)
+    if not best_series:
+        # We need to fuzzy match against ALL identities in the index
+        # Since LibraryIndex.title_map keys are normalized titles, we can iterate those.
         
-        if best_match: break
-
-        # 2. Fuzzy Match
         best_ratio = 0.0
-        for s_name, s_path, s_norm in library_series_data:
-            if not s_norm: continue
-            
-            # SequenceMatcher can be slow, but this is now running in parallel
-            ratio = difflib.SequenceMatcher(None, norm_name, s_norm).ratio() * 100
-            if ratio > best_ratio:
-                # Enforce number consistency for high-confidence fuzzy matches
-                # This prevents "Part 1" matching "Part 2" or "Series 2021" matching "Series"
-                if ratio >= c.FUZZY_MATCH_THRESHOLD:
-                    nums_a = [int(n) for n in re.findall(r'\d+', norm_name)]
-                    nums_b = [int(n) for n in re.findall(r'\d+', s_norm)]
-                    if nums_a != nums_b:
-                        continue
-
-                best_ratio = ratio
-                if ratio >= c.FUZZY_MATCH_THRESHOLD:
-                    best_match = (s_name, s_path)
         
-        if best_match: break
+        for name in parsed.get("parsed_name", []):
+            norm_name = semantic_normalize(name)
+            if not norm_name: continue
+            
+            for indexed_norm_title, series_list in library_index.title_map.items():
+                ratio = difflib.SequenceMatcher(None, norm_name, indexed_norm_title).ratio() * 100
+                
+                if ratio > best_ratio:
+                    # Enforce number consistency for high-confidence fuzzy matches
+                    if ratio >= c.FUZZY_MATCH_THRESHOLD:
+                        nums_a = [int(n) for n in re.findall(r'\d+', norm_name)]
+                        nums_b = [int(n) for n in re.findall(r'\d+', indexed_norm_title)]
+                        if nums_a != nums_b:
+                            continue
 
-    if best_match:
-        parsed["matched_name"] = best_match[0]
-        parsed["matched_path"] = best_match[1]
+                    best_ratio = ratio
+                    if ratio >= c.FUZZY_MATCH_THRESHOLD:
+                        best_series = series_list[0] # Pick first if multiple
+                        
+        # If best_ratio was updated but below threshold, best_series remains None
+
+    if best_series:
+        parsed["matched_name"] = best_series.name
+        parsed["matched_path"] = str(best_series.path)
+        # We don't set matched_id here yet (it's set in post-processing usually to path or MAL ID)
+        # But let's set it to MAL ID if available, else relative path?
+        # The integration logic in process_match usually handles the ID format.
+        # We'll just pass the series name for now to fit existing flow.
         
     return parsed
 
@@ -421,7 +435,7 @@ def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
 
     # 6. Cleanup Name
     clean_title = clean_title.strip()
-    clean_title = re.sub(r"[\+\,\&\-]+$", "", clean_title).strip()
+    clean_title = re.sub(r"[\+\,\&\-]+", "", clean_title).strip()
     
     # 6b. Replace '&' with 'to'
     # Only apply when '&' is attached to the end of a word as a suffix (e.g. "Yotsuba&!" -> "Yotsubato!")
@@ -718,17 +732,24 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
         console.print(f"[red]Error reading {input_file}: {e}[/red]")
         return
 
-    # NEW: Scan Library for Matching
-    library_series: List[Series] = []
-    total_library_series = 0
-    matched_library_paths: Set[str] = set()
+    # NEW: Build Library Index for Matching
+    # This replaces the old list of tuples
+    index = LibraryIndex()
     
-    # Map to track Series by path for quick updates
+    # Map to track Series by path for quick updates (needed for final integration)
     series_by_path: Dict[str, Series] = {}
+    matched_library_paths: Set[str] = set()
+    total_library_series = 0
 
     if library:
         try:
-             # Flatten library
+             # Flatten and filter first if needed, BUT
+             # LibraryIndex handles searching, so we can just index everything
+             # unless we want to strictly limit the index to a query?
+             # If 'query' argument is passed, it means we only want to match AGAINST the query series.
+             # So we should filter the library before building the index.
+             
+             # Flatten library for filtering/tracking
              all_series = []
              for cat in library.categories:
                  for sub in cat.sub_categories:
@@ -737,30 +758,41 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
                          series_by_path[str(s.path)] = s
              
              # Filter if query provided
+             filtered_library = library # Use full library by default
              if query:
                  q_lower = query.lower()
-                 filtered = [s for s in all_series if q_lower in s.name.lower()]
-                 if not filtered:
+                 filtered_series = [s for s in all_series if q_lower in s.name.lower()]
+                 
+                 if not filtered_series:
                      console.print(f"[red]No series found in library matching '{query}'.[/red]")
                      return
                  
-                 if len(filtered) > 1:
-                     names = ", ".join([s.name for s in filtered[:5]])
-                     if len(filtered) > 5: names += "..."
-                     console.print(f"[yellow]Multiple matches for '{query}': {names}. Matching against all {len(filtered)}.[/yellow]")
+                 if len(filtered_series) > 1:
+                     names = ", ".join([s.name for s in filtered_series[:5]])
+                     if len(filtered_series) > 5: names += "..."
+                     console.print(f"[yellow]Multiple matches for '{query}': {names}. Matching against all {len(filtered_series)}.[/yellow]")
                  else:
-                     console.print(f"[green]Targeting series: {filtered[0].name}[/green]")
+                     console.print(f"[green]Targeting series: {filtered_series[0].name}[/green]")
                  
-                 library_series = filtered
+                 # Create a temporary library subset for the index
+                 # This is a bit hacky but effective to limit scope
+                 # We'll just build the index manually from the filtered list?
+                 # LibraryIndex expects a Library object usually.
+                 # Let's just monkey-patch the build process or manually populate it.
+                 # For simplicity, we just use the index manually.
+                 
+                 index.is_built = True
+                 for s in filtered_series:
+                     index._index_series(s)
+                 
+                 total_library_series = len(filtered_series)
              else:
-                 library_series = all_series
-                 
-             total_library_series = len(library_series)
+                 # Build full index
+                 index.build(library)
+                 total_library_series = library.total_series
+
         except Exception as e:
             console.print(f"[yellow]Warning: Could not process library for matching: {e}[/yellow]")
-
-    # Pre-calculate normalized names and basic data for workers to minimize overhead
-    library_series_data = [(s.name, str(s.path), semantic_normalize(s.name)) for s in library_series]
 
     # PERSISTENCE: Load existing output file to preserve matches
     existing_map = {}
@@ -796,6 +828,9 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
         if not parallel:
              logger.info("Running in serial mode (--no-parallel)")
         
+        # NOTE: LibraryIndex might be large. Passing it to workers via pickle is okay for moderate libraries.
+        # If library grows to 100k series, this might need shared memory or database.
+        
         if parallel and len(data) > 20: # Only use parallel for non-trivial amounts
             logger.info(f"Parallel matching active (Workers: {num_workers})")
             with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
@@ -804,7 +839,8 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
                 for entry in data:
                     magnet = entry.get("magnet_link")
                     existing = existing_map.get(magnet) if magnet else None
-                    futures.append(executor.submit(match_single_entry, entry, library_series_data, existing))
+                    # Pass INDEX instead of tuple list
+                    futures.append(executor.submit(match_single_entry, entry, index, existing))
                 
                 # Process as completed to update progress bar
                 for future in concurrent.futures.as_completed(futures):
@@ -826,7 +862,7 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
             for entry in data:
                 magnet = entry.get("magnet_link")
                 existing = existing_map.get(magnet) if magnet else None
-                parsed = match_single_entry(entry, library_series_data, existing)
+                parsed = match_single_entry(entry, index, existing)
                 processed_data.append(parsed)
                 
                 pnames = ", ".join(parsed.get('parsed_name', []))
@@ -847,7 +883,14 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
         matched_series = series_by_path[mpath]
         matched_library_paths.add(mpath)
         
-        # Compute ID (Relative Path)
+        # Compute ID (Relative Path or MAL ID if preferred)
+        # We stick to Relative Path or Name for internal ID to ensure folder consistency
+        # unless we want to switch to MAL ID completely?
+        # The refactor plan says "Identity Resolution: A Series is defined by its Unique ID (MAL ID)"
+        # But for 'matched_id' in the JSON, it's used for deduplication.
+        # Let's stick to existing logic (RelPath/Name) for now to avoid breaking Grabber.
+        # But we could potentially use matched_series.metadata.mal_id if available?
+        
         if library and library.path:
             try:
                 rel = matched_series.path.relative_to(library.path)

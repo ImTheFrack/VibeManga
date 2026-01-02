@@ -1,8 +1,39 @@
-from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from dataclasses import dataclass, field, asdict
+from typing import List, Optional, Dict, Any, Set
 from pathlib import Path
 
 from .constants import BYTES_PER_MB
+
+@dataclass
+class SeriesMetadata:
+    """Standardized schema for manga metadata.
+    saved to series.json in each series folder.
+    """
+    title: str = "Unknown"
+    title_english: Optional[str] = None
+    title_japanese: Optional[str] = None
+    synonyms: List[str] = field(default_factory=list)
+    authors: List[str] = field(default_factory=list)
+    synopsis: str = ""
+    genres: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+    demographics: List[str] = field(default_factory=list)
+    status: str = "Unknown" # Completed, Ongoing, Hiatus, Cancelled
+    total_volumes: Optional[int] = None
+    total_chapters: Optional[int] = None
+    release_year: Optional[int] = None
+    mal_id: Optional[int] = None
+    anilist_id: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'SeriesMetadata':
+        # Filter unknown keys to prevent init errors if schema changes
+        valid_keys = cls.__annotations__.keys()
+        filtered_data = {k: v for k, v in data.items() if k in valid_keys}
+        return cls(**filtered_data)
 
 @dataclass
 class Volume:
@@ -86,7 +117,25 @@ class Series:
     # External data (e.g. from Nyaa or other sources)
     external_data: Dict[str, Any] = field(default_factory=dict)
     # Metadata (e.g. from MAL/Jikan/AI via series.json)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: SeriesMetadata = field(default_factory=SeriesMetadata)
+
+    @property
+    def identities(self) -> Set[str]:
+        """
+        Returns a set of all known names/titles for this series.
+        Used for fuzzy matching and indexing.
+        """
+        ids = {self.name}
+        if self.metadata.title and self.metadata.title != "Unknown":
+            ids.add(self.metadata.title)
+        if self.metadata.title_english:
+            ids.add(self.metadata.title_english)
+        if self.metadata.title_japanese:
+            ids.add(self.metadata.title_japanese)
+        if self.metadata.synonyms:
+            ids.update(self.metadata.synonyms)
+        # We don't indiscriminately add tags as identities unless we are sure they are synonyms
+        return ids
 
     @property
     def total_volume_count(self) -> int:
@@ -113,7 +162,7 @@ class Series:
             "volumes": [v.to_dict() for v in self.volumes],
             "sub_groups": [sg.to_dict() for sg in self.sub_groups],
             "external_data": self.external_data,
-            "metadata": self.metadata
+            "metadata": self.metadata.to_dict()
         }
 
     @classmethod
@@ -124,7 +173,7 @@ class Series:
             volumes=[Volume.from_dict(v) for v in data.get("volumes", [])],
             sub_groups=[SubGroup.from_dict(sg) for sg in data.get("sub_groups", [])],
             external_data=data.get("external_data", {}),
-            metadata=data.get("metadata", {})
+            metadata=SeriesMetadata.from_dict(data.get("metadata", {}))
         )
 
 @dataclass

@@ -7,6 +7,7 @@ from typing import List, Optional, Dict, Callable
 from .models import Library, Category, Series, SubGroup, Volume
 from .analysis import inspect_archive
 from .constants import VALID_MANGA_EXTENSIONS
+from .metadata import load_local_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,16 @@ def scan_series(series_path: Path, existing_series: Optional[Series] = None) -> 
     # We'll use a simple approach: if we have existing_series, we'll try to match volumes.
     
     series = Series(name=series_path.name, path=series_path)
+    
+    # Load metadata (Source of Truth)
+    # We always check disk for series.json to ensure the in-memory object is accurate
+    local_meta = load_local_metadata(series_path)
+    if local_meta:
+        series.metadata = local_meta
+    elif existing_series:
+        # Fallback to existing state if file read fails or doesn't exist
+        series.metadata = existing_series.metadata
+
     if existing_series:
         series.external_data = existing_series.external_data
 
