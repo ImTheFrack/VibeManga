@@ -65,7 +65,7 @@ from .constants import (
     STOP_WORDS
 )
 from .ai_api import get_available_models, tracker
-from .config import load_ai_config, save_ai_config, get_role_config
+from .config import get_ai_role_config
 
 # Initialize Rich Console
 console = Console()

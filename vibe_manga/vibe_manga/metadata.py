@@ -9,7 +9,7 @@ from typing import List, Optional, Dict, Any, Union, Tuple
 
 from .constants import ROLE_CONFIG, REMOTE_AI_API_KEY, AI_MAX_RETRIES
 from .ai_api import call_ai
-from .config import get_role_config
+from .config import get_ai_role_config
 from .analysis import semantic_normalize
 from .models import SeriesMetadata
 

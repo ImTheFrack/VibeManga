@@ -33,6 +33,14 @@ class SeriesMetadata:
         # Filter unknown keys to prevent init errors if schema changes
         valid_keys = cls.__annotations__.keys()
         filtered_data = {k: v for k, v in data.items() if k in valid_keys}
+        
+        # Handle None values for list fields - use default_factory instead
+        list_fields = ['synonyms', 'authors', 'genres', 'tags', 'demographics']
+        for field_name in list_fields:
+            if field_name in filtered_data and filtered_data[field_name] is None:
+                # Remove None values so default_factory will be used
+                del filtered_data[field_name]
+        
         return cls(**filtered_data)
 
 @dataclass

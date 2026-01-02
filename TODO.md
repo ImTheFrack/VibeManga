@@ -45,7 +45,11 @@
 - [X] **Metadata Integration**:
     - Fetch from MangaUpdates, AniList, MyAnimeList
     - Store series descriptions, ratings, status
-    - [NOT IMPLEMENTED]Auto-match series by name
+    - Four-Phase Refactor (COMPLETED):
+        1. ✅ Phase 1: Models & Indexing - Strongly-typed metadata schema with LibraryIndex
+        2. ✅ Phase 2: Hydration - Jikan API integration with AI fallback
+        3. ✅ Phase 3: Robust Matching - MAL ID → synonym → fuzzy matching cascade
+        4. ✅ Phase 4: Standardization - Canonical naming enforcement
 - [ ] **Reading Progress**:
     - Track read/unread volumes
     - Last read date and position

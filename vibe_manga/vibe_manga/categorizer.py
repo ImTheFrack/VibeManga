@@ -10,7 +10,7 @@ from .models import Library, Category, Series
 from .metadata import SeriesMetadata, get_or_create_metadata
 from .ai_api import call_ai
 from .constants import ROLE_CONFIG
-from .config import get_role_config
+from .config import get_ai_role_config  # Import from config.py
 
 logger = logging.getLogger(__name__)
 console = Console()
