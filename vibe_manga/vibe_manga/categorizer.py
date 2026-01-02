@@ -33,7 +33,7 @@ def get_ai_categorization(
     with console.status(f"[bold blue]Analyzing '{series_name}'...[/bold blue]") as status:
         # 1. Moderator
         status.update(f"[bold blue]Step 1/4: Consulting Moderator...[/bold blue]")
-        mod_config = get_role_config("MODERATOR")
+        mod_config = get_ai_role_config("MODERATOR")
         mod_prompt = f"Manga Title: {series_name}\nSynopsis: {metadata.synopsis}\nGenres: {metadata.genres}\nTags: {metadata.tags}"
         moderation = call_ai(mod_prompt, mod_config["role_prompt"], provider=mod_config["provider"], model=mod_config["model"])
         if not isinstance(moderation, dict):
@@ -43,7 +43,7 @@ def get_ai_categorization(
         
         # 2. Practical
         status.update(f"[bold blue]Step 2/4: Consulting Practical Analyst...[/bold blue]")
-        prac_config = get_role_config("PRACTICAL")
+        prac_config = get_ai_role_config("PRACTICAL")
         prac_prompt = f"Manga: {series_name}\nMetadata: {metadata.to_dict()}\nCategories: {available_categories}"
         practical = call_ai(prac_prompt, prac_config["role_prompt"], provider=prac_config["provider"], model=prac_config["model"])
         if not isinstance(practical, dict):
@@ -53,7 +53,7 @@ def get_ai_categorization(
         
         # 3. Creative
         status.update(f"[bold blue]Step 3/4: Consulting Creative Director...[/bold blue]")
-        crea_config = get_role_config("CREATIVE")
+        crea_config = get_ai_role_config("CREATIVE")
         crea_prompt = f"Manga: {series_name}\nMetadata: {metadata.to_dict()}\nCategories: {available_categories}"
         creative = call_ai(crea_prompt, crea_config["role_prompt"], provider=crea_config["provider"], model=crea_config["model"])
         if not isinstance(creative, dict):
@@ -63,7 +63,7 @@ def get_ai_categorization(
         
         # 4. Consensus with Validation Loop
         status.update(f"[bold blue]Step 4/4: Reaching Consensus...[/bold blue]")
-        cons_config = get_role_config("CONSENSUS")
+        cons_config = get_ai_role_config("CONSENSUS")
         
         # Base prompt components
         base_cons_prompt = (

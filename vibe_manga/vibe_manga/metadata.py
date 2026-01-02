@@ -193,12 +193,12 @@ def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> 
     return None
 
 
-def fetch_from_ai(query: str, status_callback: Optional[callable] = None) -> Optional[SeriesMetadata]:
+def fetch_from_ai(query: str, existing_meta: Optional[SeriesMetadata] = None, status_callback: Optional[callable] = None) -> Optional[SeriesMetadata]:
     """
     Fallback: Asks AI to hallucinate (smartly) the metadata.
     Uses the configured Metadata Fetcher role.
     """
-    config = get_role_config("METADATA")
+    config = get_ai_role_config("METADATA")
     provider = config["provider"]
     model = config["model"]
     
@@ -209,7 +209,11 @@ def fetch_from_ai(query: str, status_callback: Optional[callable] = None) -> Opt
         # We assume local model is set in env or defaults
         model = None 
 
-    prompt = f"Provide detailed metadata for the manga series: '{query}'. If exact numbers are unknown, estimate based on general knowledge or set to null."
+    prompt = f"Provide detailed metadata for the manga series: '{query}'."
+    if existing_meta and existing_meta.title != "Unknown":
+        prompt += f"\nExisting partial/local metadata (JSON): {json.dumps(existing_meta.to_dict(), ensure_ascii=False)}"
+    
+    prompt += "\nIf exact numbers are unknown, estimate based on general knowledge or set to null."
     
     if status_callback:
         status_callback(f"Asking AI Fetcher ({provider})...")
@@ -230,12 +234,12 @@ def fetch_from_ai(query: str, status_callback: Optional[callable] = None) -> Opt
             
     return None
 
-def enrich_with_ai(query: str, current_meta: SeriesMetadata, status_callback: Optional[callable] = None) -> Optional[SeriesMetadata]:
+def enrich_with_ai(query: str, current_meta: SeriesMetadata, existing_meta: Optional[SeriesMetadata] = None, status_callback: Optional[callable] = None) -> Optional[SeriesMetadata]:
     """
     Uses the Metadata Supervisor role to verify if the Jikan match is correct
     and fill in any missing gaps.
     """
-    config = get_role_config("SUPERVISOR")
+    config = get_ai_role_config("SUPERVISOR")
     provider = config["provider"]
     model = config["model"]
 
@@ -244,7 +248,9 @@ def enrich_with_ai(query: str, current_meta: SeriesMetadata, status_callback: Op
         logger.info("Skipping AI enrichment (no remote key). Using Jikan data as-is.")
         return current_meta
 
-    prompt = f"User Query: {query}\nAPI Metadata: {json.dumps(current_meta.to_dict(), ensure_ascii=False)}"
+    prompt = f"User Query: {query}\nAPI Metadata (Jikan): {json.dumps(current_meta.to_dict(), ensure_ascii=False)}"
+    if existing_meta and existing_meta.title != "Unknown":
+        prompt += f"\nLocal/Existing Metadata (JSON): {json.dumps(existing_meta.to_dict(), ensure_ascii=False)}"
     
     logger.info(f"Asking AI Supervisor to verify/enrich '{query}'...")
     if status_callback:
@@ -306,13 +312,13 @@ def get_or_create_metadata(
     
     Returns (Metadata, SourceString)
     """
-    if not force_update:
-        local = load_local_metadata(series_path)
-        if local:
-            logger.info(f"Using local metadata for '{series_name}'")
-            if status_callback:
-                status_callback("Using local metadata.")
-            return local, "Local"
+    local = load_local_metadata(series_path)
+    
+    if not force_update and local:
+        logger.info(f"Using local metadata for '{series_name}'")
+        if status_callback:
+            status_callback("Using local metadata.")
+        return local, "Local"
             
     # Try Jikan first (Free, Accurate)
     logger.info(f"Fetching metadata for '{series_name}' from Jikan...")
@@ -335,7 +341,7 @@ def get_or_create_metadata(
 
         # Verify and Enrich with AI
         # If verify fails, it returns None, triggering the fallback below
-        enriched = enrich_with_ai(series_name, meta, status_callback=status_callback)
+        enriched = enrich_with_ai(series_name, meta, existing_meta=local, status_callback=status_callback)
         if enriched:
             meta = enriched
             source = "AI Supervisor"
@@ -347,7 +353,7 @@ def get_or_create_metadata(
         logger.info(f"Jikan failed or was rejected. Asking AI (Fetcher) for '{series_name}'...")
         if status_callback:
             status_callback("Resolving rejection / fetching from AI...")
-        meta = fetch_from_ai(series_name, status_callback=status_callback)
+        meta = fetch_from_ai(series_name, existing_meta=local, status_callback=status_callback)
         source = "AI Fetcher"
         
     if meta:

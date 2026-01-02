@@ -137,8 +137,12 @@
 - [ ] Pre-commit hooks (black, flake8, mypy)
 
 ### Refactoring
-- [ ] **Centralized Utilities**: Extract common functionality into shared utility modules to reduce duplication
-    - [ ] **Standardize Progress Bars**: Create a factory function (e.g., `create_progress_bar`) to ensure consistent visual style (spinner, bar, percentage, time remaining) across `main.py`, `matcher.py`, and `grabber.py`.
+- [x] **Command Modularization**: Break down `main.py` into specific CLI modules (In Progress).
+    - [x] Created `cli` package and `base.py`.
+    - [x] Extracted `scrape`, `match`, `grab`, `pull`.
+    - [ ] Extract remaining commands (`metadata`, `stats`, `categorize`, etc.).
+- [x] **Centralized Utilities**: Extract common functionality into shared utility modules to reduce duplication
+    - [x] **Standardize Progress Bars**: Moved `run_scan_with_progress` to `cli/base.py`.
     - [ ] **Unified JSON I/O**: Implement `load_json` and `save_json` with standardized error handling (console error printing + logging) to replace repetitive `try-except` blocks in `matcher.py`, `grabber.py`, and `main.py`.
     - [ ] **Series Matching**: Move `find_series_match` (from `grabber.py`) and matching logic from `matcher.py` and `main.py` (show command) into a robust central search function in `analysis.py`.
     - [ ] **Range Formatting**: Merge `vibe_format_range` (from `grabber.py`) into `analysis.format_ranges` to support optional prefixes and padding centrally.

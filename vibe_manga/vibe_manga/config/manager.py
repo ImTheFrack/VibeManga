@@ -7,7 +7,7 @@ It replaces scattered environment variable access with a single source of truth.
 
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
-from pydantic import Field, field_validator, ConfigDict
+from pydantic import Field, field_validator, ConfigDict, BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict, PydanticBaseSettingsSource
 
 
@@ -118,17 +118,29 @@ class ProcessingConfig(BaseSettings):
     timeout: int = Field(default=300, description="Operation timeout in seconds")
 
 
-class AIRoleConfig(BaseSettings):
+class AIRoleConfig(BaseModel):
     """Configuration for AI roles (used by categorizer)"""
-    
-    model_config = SettingsConfigDict(
-        env_file="vibe_manga_ai_config.json",
-        case_sensitive=False,
-        extra="allow"  # Allow arbitrary role definitions
-    )
     
     # Dynamic role configuration loaded from JSON
     roles: Dict[str, Any] = Field(default_factory=dict, description="AI role configurations")
+
+    @classmethod
+    def load_from_json(cls, path: Union[str, Path] = "vibe_manga_ai_config.json") -> "AIRoleConfig":
+        """Load AI role configuration from a JSON file."""
+        path = Path(path)
+        if not path.exists():
+            return cls()
+        
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                import json
+                data = json.load(f)
+            # Support both {"roles": {...}} and raw roles dict
+            if "roles" in data:
+                return cls(roles=data["roles"])
+            return cls(roles=data)
+        except Exception:
+            return cls()
 
 
 class VibeMangaConfig(BaseSettings):
@@ -156,7 +168,8 @@ class VibeMangaConfig(BaseSettings):
     cache: CacheConfig = Field(default_factory=CacheConfig, description="Cache configuration")
     logging: LoggingConfig = Field(default_factory=LoggingConfig, description="Logging configuration")
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig, description="Processing configuration")
-    ai_roles: AIRoleConfig = Field(default_factory=AIRoleConfig, description="AI role configuration for categorizer")
+    ai_roles: AIRoleConfig = Field(default_factory=AIRoleConfig.load_from_json, description="AI role configuration for categorizer")
+
     
     # Feature flags
     dry_run: bool = Field(default=False, description="Enable dry run mode")
