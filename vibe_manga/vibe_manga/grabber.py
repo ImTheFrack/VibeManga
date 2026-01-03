@@ -7,7 +7,7 @@ import time
 import shutil
 import difflib
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from datetime import datetime
 
 from rich.table import Table
@@ -34,8 +34,9 @@ from .indexer import LibraryIndex
 from .logging import get_logger, log_substep, temporary_log_level, console
 from .cache import load_library_state, save_library_cache
 from .matcher import consolidate_entries, parse_entry
+from .metadata import fetch_from_jikan
 from .scanner import scan_series
-from .models import Category
+from .models import Category, Library, Series
 from .analysis import (
     
     semantic_normalize,
@@ -48,6 +49,38 @@ from .analysis import (
 )
 
 logger = get_logger(__name__)
+
+# Simple cache for LibraryIndex to avoid rebuilding it multiple times in a single command run
+_index_cache = {}
+
+def find_series_match(text: str, library: Library) -> Optional[Series]:
+    """
+    Finds a series in the library that matches the given text.
+    Uses LibraryIndex for efficient matching.
+    """
+    lib_id = id(library)
+    if lib_id not in _index_cache:
+        index = LibraryIndex()
+        index.build(library)
+        _index_cache[lib_id] = index
+    
+    index = _index_cache[lib_id]
+    candidates = generate_search_candidates(text)
+    
+    for cand in candidates:
+        matches = index.search(cand)
+        if matches:
+            return matches[0]
+            
+    # Fuzzy fallback
+    for cand in candidates:
+        # Use project-wide threshold (LibraryIndex expects 0.0-1.0 float)
+        thresh = FUZZY_MATCH_THRESHOLD / 100.0 if FUZZY_MATCH_THRESHOLD > 1.0 else FUZZY_MATCH_THRESHOLD
+        matches = index.fuzzy_search(cand, threshold=thresh)
+        if matches:
+            return matches[0]
+            
+    return None
 
 def generate_search_candidates(text: str) -> List[str]:
     """
@@ -343,10 +376,30 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
             
     if not name or name == "next":
         found = False
+        # Terminal statuses always cause a group to be skipped in all 'next' modes
+        terminal_statuses = ["grabbed", "skipped", "pulled", "blacklisted"]
+        
         for i, g in enumerate(manga_groups):
             group_names = set(g["parsed_name"])
             group_entries = [e for e in data if any(n in group_names for n in e.get("parsed_name", []))]
-            if not any(e.get("grab_status") for e in group_entries):
+            
+            # A group is "processed" if any of its entries have a terminal or relevant skip status
+            is_processed = False
+            for e in group_entries:
+                status_val = e.get("grab_status")
+                if status_val in terminal_statuses:
+                    is_processed = True
+                    break
+                # skipautoadd: Skip if in any auto-add mode (prompting or only)
+                if (auto_add or auto_add_only) and status_val == "skipautoadd":
+                    is_processed = True
+                    break
+                # skipautoaddonly: Skip only if in auto-add-only mode
+                if auto_add_only and status_val == "skipautoaddonly":
+                    is_processed = True
+                    break
+            
+            if not is_processed:
                 start_idx = i
                 found = True
                 break
@@ -399,9 +452,14 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                 l_v_set = set(l_v_nums)
                 l_c_set = set(l_c_nums)
                 
+                # Define statuses to skip for content analysis
+                skip_content = ["grabbed", "skipped", "pulled", "blacklisted", "skipautoadd"]
+                if auto_add_only:
+                    skip_content.append("skipautoaddonly")
+
                 for f in group_files:
                     # Skip already processed files from content analysis
-                    if f.get("grab_status") in ["grabbed", "skipped", "pulled"]:
+                    if f.get("grab_status") in skip_content:
                         continue
 
                     t_bytes = parse_size(f.get("size"))
@@ -475,7 +533,16 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                 added_via_completed = False
 
                 for f in sorted_group_files:
-                    if f.get("grab_status") in ["grabbed", "skipped", "pulled"]:
+                    # Skip files that are terminal or already skipped for auto-add in this mode
+                    skip_eval = ["grabbed", "skipped", "pulled", "blacklisted", "skipautoadd"]
+                    if auto_add_only:
+                        skip_eval.append("skipautoaddonly")
+                        
+                    if f.get("grab_status") in skip_eval:
+                        continue
+
+                    # Explicitly skip JXL/JPEG-XL formats for auto-add
+                    if is_jxl(f):
                         continue
 
                     v_nums, _, _ = classify_unit(f.get("name", ""))
@@ -542,6 +609,18 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                 if auto_add_only:
                     # Update status with transient message (no permanent output)
                     status.update(f"[dim]Processing Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (Auto-add criteria not met - skipping)[/dim]")
+                    
+                    # Mark unflagged files as skipautoaddonly so they are skipped in future --auto-add-only runs
+                    for f in group_files:
+                        if not f.get("grab_status"):
+                            f["grab_status"] = "skipautoaddonly"
+                    
+                    try:
+                        with open(input_file, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, indent=2)
+                    except Exception as e:
+                        console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
+
                     groups_skipped += 1
                     current_idx += 1
                     continue
@@ -611,6 +690,18 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
             if choice_clean == 'q':
                 break
             elif choice_clean == 'n':
+                # If we are in any auto-add mode, mark as skipautoadd to avoid re-prompting/re-evaluating next time
+                if auto_add or auto_add_only:
+                    for f in group_files:
+                        if not f.get("grab_status"):
+                            f["grab_status"] = "skipautoadd"
+                    
+                    try:
+                        with open(input_file, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, indent=2)
+                    except Exception as e:
+                        console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
+
                 current_idx += 1
                 continue
             elif choice_clean == 's':

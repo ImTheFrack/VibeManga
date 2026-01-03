@@ -68,7 +68,7 @@ def pullcomplete(ctx, input_file: str, verbose: int) -> None:
                 ctx.invoke(func, **kwargs)
 
     # 1. Pull
-    run_step("Step 1/6: Pulling Completed Torrents", pull, input_file=input_file, simulate=False, pause=False)
+    run_step("Step 1/6: Pulling Completed Torrents", pull, input_file=input_file, simulate=False, pause=False, verbose=verbose)
     
     # 2. Refresh Cache (Silent Scan)
     msg = "Step 2/6: Refreshing Library Cache"

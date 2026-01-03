@@ -305,18 +305,25 @@ def semantic_normalize(name: str) -> str:
     name = re.sub(r"\b(The|A|An|Le|La|Les|Un|Une)\b", " ", name, flags=re.IGNORECASE)
     
     # 2b. Expand common symbols to alphanumeric equivalents
-    name = name.replace("½", "1 2")
-    name = name.replace("⅓", "1 3")
-    name = name.replace("¼", "1 4")
+    name = name.replace("½", " 1 2 ")
+    name = name.replace("⅓", " 1 3 ")
+    name = name.replace("¼", " 1 4 ")
     # Handle '&' (often 'and' or 'to')
     # If it's Yotsuba&! -> Yotsubato
     name = re.sub(r"(?<=\w)&(?!\w|\s)", "to", name)
     name = name.replace("&", " and ")
 
-    # 3. Strip non-alphanumeric
-    name = re.sub(r"[^a-zA-Z0-9]", "", name)
-    # 4. Lowercase
-    return name.lower()
+    # 3. Aggressive cleanup: Replace all non-alphanumeric with SPACE
+    # This prevents "Year-Long" from becoming "yearlong" (merged) vs "year long"
+    name = re.sub(r"[^a-zA-Z0-9]", " ", name)
+    
+    # 4. Lowercase and collapse whitespace to single space
+    name = name.lower().strip()
+    name = re.sub(r"\s+", " ", name)
+    
+    # 5. Remove all spaces for the final comparison key
+    # This ensures "year long" and "yearlong" match perfectly.
+    return name.replace(" ", "")
 
 def calculate_rename_safety(current: str, target: str) -> int:
     """

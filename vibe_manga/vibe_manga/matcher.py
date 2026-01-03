@@ -190,8 +190,9 @@ def match_single_entry(entry: Dict[str, Any], library_index: Optional[LibraryInd
                 if ratio > best_ratio:
                     # Enforce number consistency for high-confidence fuzzy matches
                     if ratio >= c.FUZZY_MATCH_THRESHOLD:
-                        nums_a = [int(n) for n in re.findall(r'\d+', norm_name)]
-                        nums_b = [int(n) for n in re.findall(r'\d+', indexed_norm_title)]
+                        # Extract numbers from the ALREADY normalized strings
+                        nums_a = re.findall(r'\d+', norm_name)
+                        nums_b = re.findall(r'\d+', indexed_norm_title)
                         if nums_a != nums_b:
                             continue
 
@@ -312,6 +313,30 @@ def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
 
     # 4. Parsing Logic
     
+    # --- PROTECTION: Identify earliest prefix to protect preceding title numbers ---
+    # We check all possible prefix patterns to find the very first one.
+    # Numbers occurring before this index are likely part of the title (e.g. "Persona 5 v01")
+    prefix_found = False
+    earliest_prefix_idx = len(clean_title)
+    
+    as_m = re.search(AS_PATTERN, clean_title, re.IGNORECASE)
+    if as_m: 
+        earliest_prefix_idx = min(earliest_prefix_idx, as_m.start())
+        prefix_found = True
+    
+    messy_m = re.search(MESSY_VOL_PATTERN, clean_title, re.IGNORECASE)
+    if messy_m: 
+        earliest_prefix_idx = min(earliest_prefix_idx, messy_m.start())
+        prefix_found = True
+    
+    for vm in re.finditer(VOL_PATTERN, clean_title, re.IGNORECASE):
+        earliest_prefix_idx = min(earliest_prefix_idx, vm.start())
+        prefix_found = True
+        
+    for cm in re.finditer(PREFIXED_CHAPTER_PATTERN, clean_title, re.IGNORECASE):
+        earliest_prefix_idx = min(earliest_prefix_idx, cm.start())
+        prefix_found = True
+
     # Case A: "as vXX + YY"
     as_match = re.search(AS_PATTERN, clean_title, re.IGNORECASE)
     if as_match:
@@ -403,6 +428,11 @@ def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
                 if not naked_match:
                     break
                 
+                # PROTECTION: If this naked match is BEFORE the first prefixed volume/chapter,
+                # it is likely part of the title (e.g. "Persona 5 v01") and should not be stripped.
+                if prefix_found and naked_match.start() < earliest_prefix_idx:
+                    break
+
                 start_raw = naked_match.group(1)
                 end_raw = naked_match.group(2)
                 
