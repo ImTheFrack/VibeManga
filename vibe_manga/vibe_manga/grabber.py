@@ -61,9 +61,12 @@ def get_matched_or_parsed_name(torrent_name: str, library: Optional[Any] = None,
                 if mid and mid in series_map:
                     return f"[green]{series_map[mid].name}[/green]"
                 # Even if not in map, maybe we have a matched_name
-                mname = entry.get("matched_name")
-                if mname:
-                    return f"[green]{mname}[/green]"
+                #mname = entry.get("matched_name")
+                #if mname:
+                #    return f"[green]{mname}[/green]"
+                # BUGFIX: Only use matched_name if we have a verified library match
+                # Otherwise, re-parse to get the correct name
+                
                 break
 
     # 2. Try Library Fuzzy Match

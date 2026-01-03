@@ -81,7 +81,7 @@ NAME_STRIP_PATTERNS = [
 ]
 
 # "X as vY + Z" or "X as vY"
-AS_PATTERN = r"([\d\.x]+(?:[-\.][\d\.x]+)?)\s+as\s+v?(\d+(?:[-\.]\d+)?)(?:\s*\+\s*(\d+(?:[-\.]\d+)?))?"
+AS_PATTERN = r"([\d\.x]+(?:[-\.][\d\.x]+)?)\s+as\s+v?(\d+(?:[-\.]\d+)?)(?:\s*\+\s*(\d+(?:\.\d+)?(?:[-\s]\d+(?:\.\d+)?)?))?"
 
 # Messy Volume Pattern
 MESSY_VOL_PATTERN = r"\b(?:v|vol)[0-9][0-9v._-]*\b"
