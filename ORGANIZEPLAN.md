@@ -1,8 +1,9 @@
 # Implementation Plan: `organize` Command
 
 **Objective:** Create a granular, filter-based command for **restructuring** (Move) or **selective export** (Copy) of the manga library.
+**Status:** Updated to align with Phase 2 CLI Refactoring architecture.
 
-## 1. Core Logic (`categorizer.py`)
+## 1. Core Logic (`vibe_manga/categorizer.py`)
 
 *   **Goal:** Enable "Directed Categorization" and schema adaptation.
 *   **Changes:**
@@ -12,11 +13,19 @@
         *   `restrict_to_main` (str): For limiting AI choices to a specific parent category.
     *   **Logic:** If `restrict_to_main` is present, filter the available category list (whether from library or custom_categories) to only include paths starting with that main category.
 
-## 2. The New Command (`main.py`)
+## 2. The New Command (`vibe_manga/cli/organize.py`)
 
-*   **Name:** `organize`
+*   **File:** `vibe_manga/vibe_manga/cli/organize.py` (New File)
+*   **Registration:** Import in `vibe_manga/vibe_manga/main.py` to expose as `organize`.
 *   **Default Behavior:** **Filesystem MOVE** within the current library.
 *   **Newroot Behavior:** **Filesystem COPY** from current library to new root.
+
+### Dependencies
+*   From `..base`: `console`, `run_scan_with_progress`, `get_library_root`
+*   From `..config`: `get_config`
+*   From `..logging`: `get_logger`
+*   From `..indexer`: `LibraryIndex`
+*   From `..categorizer`: `suggest_category`
 
 ### Options
 
@@ -45,7 +54,7 @@
 ## 3. Logic Flow
 
 ### Phase 1: Setup
-1.  **Scan Library:** standard `run_scan_with_progress`.
+1.  **Scan Library:** Use `run_scan_with_progress` (from `cli.base`) to get the current library state.
 2.  **Build Index:** Initialize and build `LibraryIndex` from the scanned library to ensure fast lookups and identity resolution.
 3.  **Determine Mode & Schema:**
     *   **IF `--newroot` provided:**
@@ -54,6 +63,7 @@
         *   Set **Mode = COPY**.
         *   Set **Base Destination = New Root Path**.
     *   **ELSE:**
+        *   Use `get_library_root()` (from `cli.base`) for default path.
         *   Set `custom_schema = None`.
         *   Set **Mode = MOVE**.
         *   Set **Base Destination = Current Library Path**.
@@ -93,9 +103,9 @@
     *   *Action:* **COPIES** all Romance series to `D:/Backups/[AI-Selected-Main]/[AI-Selected-Sub]`. The AI aligns with whatever folder structure exists on D:.
 
 ## 5. Relationship with `categorize`
-The `organize` command is designed as a strict superset of the existing `categorize` command.
+The `organize` command is designed as a strict superset of the existing `categorize` command (now located at `vibe_manga/cli/categorize.py`).
 *   **Equivalence:** Running `organize --source "Uncategorized"` is functionally identical to running `categorize`.
 *   **Strategy:**
-    1.  Implement `organize` as a standalone "Core Engine".
-    2.  Retain `categorize` as-is for now to ensure stability.
-    3.  Once `organize` is fully tested and verified, `categorize` can be refactored to simply call `organize` with preset arguments (or be deprecated entirely).
+    1.  Implement `organize` as a standalone command in `vibe_manga/cli/organize.py`.
+    2.  Retain `vibe_manga/cli/categorize.py` as-is for now to ensure stability.
+    3.  Once `organize` is fully tested and verified, `vibe_manga/cli/categorize.py` can be refactored to simply call `organize` logic or be deprecated.

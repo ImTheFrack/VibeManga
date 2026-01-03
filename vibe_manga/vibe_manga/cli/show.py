@@ -221,6 +221,8 @@ def show(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
                         info += f", {vol.page_count} p"
                         if vol.is_corrupt:
                             info += ", [bold red]CORRUPT[/bold red]"
+                        else:
+                            info += ", [green]OK[/green]"
                     info += ")[/dim]"
                     series_tree.add(f":page_facing_up: {vol.name} {info}")
 
@@ -241,3 +243,29 @@ def show(series_name: str, showfiles: bool, deep: bool, verify: bool, no_cache: 
             content_elements.append(series_tree)
             
         console.print(Padding(Group(*content_elements), (0, 0, 1, 2)))
+        
+        # Verification Summary (if --verify was used)
+        if verify:
+            # Count corrupt volumes
+            corrupt_volumes = []
+            all_vols = series.volumes + [v for sg in series.sub_groups for v in sg.volumes]
+            for vol in all_vols:
+                if vol.is_corrupt:
+                    corrupt_volumes.append(vol.name)
+            
+            if corrupt_volumes:
+                console.print(Panel(
+                    f"[bold red]Verification Failed[/bold red]\n\n"
+                    f"Found [red]{len(corrupt_volumes)}[/red] corrupt archive(s):\n"
+                    f"[dim]" + "\n".join(f"  • {name}" for name in corrupt_volumes[:10]) + "[/dim]" +
+                    (f"\n[dim]  ... and {len(corrupt_volumes) - 10} more" if len(corrupt_volumes) > 10 else ""),
+                    title="[red]Archive Verification[/red]",
+                    border_style="red"
+                ))
+            else:
+                console.print(Panel(
+                    f"[bold green]✓ All archives verified successfully[/bold green]\n\n"
+                    f"Verified [green]{len(all_vols)}[/green] volume(s) - no corruption detected",
+                    title="[green]Archive Verification[/green]",
+                    border_style="green"
+                ))

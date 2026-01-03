@@ -20,6 +20,7 @@ from .cli.metadata import metadata
 from .cli.hydrate import hydrate
 from .cli.rename import rename
 from .cli.categorize import categorize
+from .cli.organize import organize
 from .cli.pullcomplete import pullcomplete
 from .cli.scrape import scrape
 from .cli.match import match
@@ -68,6 +69,7 @@ cli.add_command(metadata)
 cli.add_command(hydrate)
 cli.add_command(rename)
 cli.add_command(categorize)
+cli.add_command(organize)
 cli.add_command(pullcomplete)
 
 if __name__ == "__main__":

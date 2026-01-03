@@ -1,5 +1,6 @@
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union, Any
+from dataclasses import dataclass
 from collections import defaultdict
 
 from .models import Library, Series
@@ -7,15 +8,22 @@ from .analysis import semantic_normalize
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class LightweightSeries:
+    """Minimal series representation for worker processes."""
+    name: str
+    path: str
+    mal_id: Optional[int] = None
+
 class LibraryIndex:
     """
     Indexes the library for fast lookups by ID and Title (synonyms included).
     Acts as the source of truth for series identity.
     """
     def __init__(self):
-        self.mal_id_map: Dict[int, Series] = {}
+        self.mal_id_map: Dict[int, Union[Series, LightweightSeries]] = {}
         # Maps normalized title -> List of Series (collisions possible but rare with ID)
-        self.title_map: Dict[str, List[Series]] = defaultdict(list)
+        self.title_map: Dict[str, List[Union[Series, LightweightSeries]]] = defaultdict(list)
         self.is_built: bool = False
 
     def build(self, library: Library):
@@ -30,6 +38,47 @@ class LibraryIndex:
         
         self.is_built = True
         logger.info(f"Library Index built. Indexed {len(self.mal_id_map)} IDs and {len(self.title_map)} distinct title keys.")
+
+    def to_lightweight(self) -> 'LibraryIndex':
+        """
+        Creates a lightweight copy of the index suitable for pickling/multiprocessing.
+        Replaces heavy Series objects with LightweightSeries.
+        """
+        light_index = LibraryIndex()
+        
+        # 1. Convert MAL ID Map
+        for mal_id, series in self.mal_id_map.items():
+            light_series = LightweightSeries(
+                name=series.name,
+                path=str(series.path),
+                mal_id=getattr(series.metadata, 'mal_id', None) if hasattr(series, 'metadata') else series.mal_id
+            )
+            light_index.mal_id_map[mal_id] = light_series
+
+        # 2. Convert Title Map
+        # We need to map original Series objects to their Lightweight counterparts 
+        # to maintain reference identity if that mattered (it doesn't really for matching)
+        # But efficiently, we can just recreate them.
+        
+        for norm_title, series_list in self.title_map.items():
+            new_list = []
+            for series in series_list:
+                # Check if we already created a lightweight version in the ID map to save memory?
+                # Probably overkill. Just create new simple objects.
+                
+                # Handle case where series is already lightweight (if re-converting)
+                if isinstance(series, LightweightSeries):
+                    new_list.append(series)
+                else:
+                    new_list.append(LightweightSeries(
+                        name=series.name,
+                        path=str(series.path),
+                        mal_id=series.metadata.mal_id
+                    ))
+            light_index.title_map[norm_title] = new_list
+            
+        light_index.is_built = True
+        return light_index
 
     def _index_category(self, category):
         """Recursively indexes categories."""
@@ -60,7 +109,7 @@ class LibraryIndex:
             if series not in self.title_map[norm]:
                 self.title_map[norm].append(series)
 
-    def search(self, query: str) -> List[Series]:
+    def search(self, query: str) -> List[Union[Series, LightweightSeries]]:
         """
         Searches for a series by exact normalized title match.
         Returns a list of matches (usually 1, but duplicates possible).
@@ -75,7 +124,7 @@ class LibraryIndex:
             
         return self.title_map.get(norm, [])
 
-    def get_by_id(self, mal_id: int) -> Optional[Series]:
+    def get_by_id(self, mal_id: int) -> Optional[Union[Series, LightweightSeries]]:
         """Returns a series by MAL ID."""
         if not self.is_built:
             logger.warning("Index lookup called before build.")

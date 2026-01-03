@@ -27,7 +27,7 @@ class TestCLIInfrastructure:
         expected_commands = {
             "scrape", "match", "grab", "pull", "pullcomplete",
             "tree", "show", "dedupe", "stats",
-            "metadata", "hydrate", "rename", "categorize"
+            "metadata", "hydrate", "rename", "categorize", "organize"
         }
         registered_commands = set(cli.commands.keys())
         
@@ -104,7 +104,7 @@ class TestCommandsSmoke:
     @pytest.mark.parametrize("command_name", [
         "scrape", "match", "grab", "pull", "pullcomplete",
         "tree", "show", "dedupe", "stats",
-        "metadata", "hydrate", "rename", "categorize"
+        "metadata", "hydrate", "rename", "categorize", "organize"
     ])
     def test_command_help(self, runner, command_name):
         """Test that each command can display its help message."""

@@ -303,11 +303,11 @@ def get_or_create_metadata(
     status_callback: Optional[callable] = None
 ) -> Tuple[SeriesMetadata, str]:
     """
-    Main entry point.
-    1. Checks local series.json (unless force_update).
+    Main entry point for series metadata acquisition.
+    1. Checks local series.json (returns if not force_update).
     2. Tries Jikan API.
-    3. Verifies/Enriches with AI (Supervisor).
-    4. Fallback to AI (Fetcher) if rejected or not found.
+    3. Verifies/Enriches with AI (Supervisor), using local data as context.
+    4. Fallback to AI (Fetcher) if rejected/not found, using local data as context.
     5. Saves result to series.json.
     
     Returns (Metadata, SourceString)

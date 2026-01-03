@@ -191,6 +191,16 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
             if c_nums: total_chapters += len(c_nums)
             if u_nums: total_units += len(u_nums)
 
+    total_corrupt_volumes = 0
+    corrupt_volumes_list = []
+    if verify:
+        for t in all_target_series:
+            all_vols = t.volumes + [v for sg in t.sub_groups for v in sg.volumes]
+            for v in all_vols:
+                if v.is_corrupt:
+                    total_corrupt_volumes += 1
+                    corrupt_volumes_list.append((t.name, v.name))
+
     total_gb = total_size / BYTES_PER_GB
     logger.info(f"Stats aggregated: {total_series} series, {total_volumes} volumes, {total_gb:.2f} GB")
 
@@ -231,6 +241,11 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
     if deep:
         cards.append(make_stat_panel(f"{total_pages:,}", "Total Pages", "blue"))
     cards.append(make_stat_panel(f"{total_gb:.2f} GB", "Total Size", "yellow"))
+    
+    if verify and total_corrupt_volumes > 0:
+        cards.append(make_stat_panel(str(total_corrupt_volumes), "Corrupt Volumes", "red"))
+    elif verify:
+        cards.append(make_stat_panel("✓", "All Verified", "green"))
     
     if target_type == "Library":
         cards.append(make_stat_panel(str(library.total_categories), "Categories", "magenta"))
@@ -495,3 +510,43 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
     final_layout.add_row(t, Group(*side_content))
 
     console.print(final_layout)
+    
+    # Verification Report (if --verify was used)
+    if verify:
+        if total_corrupt_volumes > 0:
+            # Group corrupt volumes by series for better readability
+            from collections import defaultdict
+            corrupt_by_series = defaultdict(list)
+            for series_name, vol_name in corrupt_volumes_list:
+                corrupt_by_series[series_name].append(vol_name)
+            
+            # Build detailed report
+            report_lines = []
+            report_lines.append(f"[bold red]Archive Verification Failed[/bold red]")
+            report_lines.append("")
+            report_lines.append(f"Found [red]{total_corrupt_volumes}[/red] corrupt volume(s) across [red]{len(corrupt_by_series)}[/red] series:")
+            report_lines.append("")
+            
+            for series_name, vols in corrupt_by_series.items():
+                report_lines.append(f"[yellow]{series_name}[/yellow]:")
+                for vol in vols[:5]:  # Show first 5 per series
+                    report_lines.append(f"  • [dim]{vol}[/dim]")
+                if len(vols) > 5:
+                    report_lines.append(f"  [dim]... and {len(vols) - 5} more[/dim]")
+            
+            console.print("")
+            console.print(Panel(
+                "\n".join(report_lines),
+                title="[red]Verification Report[/red]",
+                border_style="red",
+                padding=(1, 2)
+            ))
+        else:
+            console.print("")
+            console.print(Panel(
+                f"[bold green]✓ Archive Verification Successful[/bold green]\n\n"
+                f"Verified [green]{total_volumes}[/green] volume(s) across [green]{total_series}[/green] series - no corruption detected",
+                title="[green]Verification Report[/green]",
+                border_style="green",
+                padding=(1, 2)
+            ))

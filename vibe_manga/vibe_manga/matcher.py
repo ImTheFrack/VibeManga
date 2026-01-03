@@ -833,14 +833,18 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
         
         if parallel and len(data) > 20: # Only use parallel for non-trivial amounts
             logger.info(f"Parallel matching active (Workers: {num_workers})")
+            
+            # Optimize payload size for workers
+            worker_index = index.to_lightweight()
+            
             with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
                 # Prepare tasks
                 futures = []
                 for entry in data:
                     magnet = entry.get("magnet_link")
                     existing = existing_map.get(magnet) if magnet else None
-                    # Pass INDEX instead of tuple list
-                    futures.append(executor.submit(match_single_entry, entry, index, existing))
+                    # Pass worker_index instead of full index
+                    futures.append(executor.submit(match_single_entry, entry, worker_index, existing))
                 
                 # Process as completed to update progress bar
                 for future in concurrent.futures.as_completed(futures):

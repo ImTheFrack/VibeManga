@@ -2,6 +2,7 @@
 Caching and persistence functionality for VibeManga library scans.
 """
 
+import hashlib
 import logging
 import pickle
 import json
@@ -16,13 +17,21 @@ logger = logging.getLogger(__name__)
 
 
 def get_cache_path(library_root: Path) -> Path:
-    """Returns the cache file path (stored in current working directory)."""
-    return Path.cwd() / CACHE_FILENAME
+    """Returns the cache file path based on library root."""
+    # Create a safe filename from the library path using stable MD5 hash
+    path_str = str(library_root.resolve())
+    path_hash = hashlib.md5(path_str.encode()).hexdigest()[-8:]
+    filename = f".vibe_manga_cache_{path_hash}.pkl"
+    return Path.cwd() / filename
 
 
 def get_state_path(library_root: Path) -> Path:
-    """Returns the persistent state JSON path (stored in current working directory)."""
-    return Path.cwd() / LIBRARY_STATE_FILENAME
+    """Returns the persistent state JSON path based on library root."""
+    # Create a safe filename from the library path using stable MD5 hash
+    path_str = str(library_root.resolve())
+    path_hash = hashlib.md5(path_str.encode()).hexdigest()[-8:]
+    filename = f"vibe_manga_library_{path_hash}.json"
+    return Path.cwd() / filename
 
 
 def get_cached_library(
