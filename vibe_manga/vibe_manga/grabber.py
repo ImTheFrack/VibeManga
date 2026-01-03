@@ -38,6 +38,7 @@ from .models import Category
 from .analysis import (
     
     semantic_normalize,
+    strip_volume_info,
     classify_unit,
     format_ranges,
     parse_size,
@@ -110,35 +111,195 @@ def find_series_match(torrent_name: str, library: Optional[Any] = None) -> Optio
     if not library:
         return None
     
-    norm_t_name = semantic_normalize(torrent_name)
+        # Strip volume/chapter info before normalizing to improve match rate for short titles
+    clean_name = strip_volume_info(torrent_name)
+
+    # --- PASS 1: Full Name Match ---
+    # Prioritize matching the full string before splitting
+    norm_full = semantic_normalize(clean_name)
     best_match = None
     best_ratio = 0.0
 
-    for cat in library.categories:
-        for sub in cat.sub_categories:
-            for s in sub.series:
-                norm_s_name = semantic_normalize(s.name)
-                if not norm_s_name: continue
-                
-                # 1. Exact Match (Normalized)
-                if norm_s_name == norm_t_name:
-                    return s
-                
-                # 2. Fuzzy Match
-                ratio = difflib.SequenceMatcher(None, norm_t_name, norm_s_name).ratio() * 100
-                if ratio > best_ratio:
-                    # Enforce number consistency for high-confidence fuzzy matches
-                    if ratio >= FUZZY_MATCH_THRESHOLD:
-                        nums_a = [int(n) for n in re.findall(r'\d+', norm_t_name)]
-                        nums_b = [int(n) for n in re.findall(r'\d+', norm_s_name)]
-                        if nums_a != nums_b:
-                            continue
-
-                    best_ratio = ratio
-                    if ratio >= FUZZY_MATCH_THRESHOLD:
-                        best_match = s
-
-    return best_match
+    if norm_full:
+        for cat in library.categories:
+    
+                for sub in cat.sub_categories:
+    
+                    for s in sub.series:
+    
+                        norm_s_name = semantic_normalize(s.name)
+    
+                        if not norm_s_name: continue
+    
+    
+    
+                        if norm_s_name == norm_full:
+    
+                            return s
+    
+                        
+    
+                        ratio = difflib.SequenceMatcher(None, norm_full, norm_s_name).ratio() * 100
+    
+                        if ratio > best_ratio:
+    
+                            if ratio >= FUZZY_MATCH_THRESHOLD:
+    
+                                 # Same number check logic
+    
+                                 nums_a = [int(n) for n in re.findall(r'\d+', norm_full)]
+    
+                                 nums_b = [int(n) for n in re.findall(r'\d+', norm_s_name)]
+    
+                                 if nums_a != nums_b: continue
+    
+                            
+    
+                            best_ratio = ratio
+    
+                            if ratio >= FUZZY_MATCH_THRESHOLD:
+    
+                                best_match = s
+    
+        
+    
+        # If we found a high-confidence match with the full name, return it.
+    
+        if best_match:
+    
+            return best_match
+    
+    
+    
+        # --- PASS 2: Split/Subtitle Match ---
+    
+        # Only if full match failed, try breaking it down
+    
+        candidates = []
+    
+    
+    
+        # Check for multi-title separators (|, ｜, /)
+    
+        if "|" in clean_name:
+    
+            candidates.extend([p.strip() for p in clean_name.split("|")])
+    
+        if "｜" in clean_name:
+    
+            candidates.extend([p.strip() for p in clean_name.split("｜")])
+    
+        if "/" in clean_name:
+    
+            if " / " in clean_name:
+    
+                 candidates.extend([p.strip() for p in clean_name.split("/")])
+    
+    
+    
+        # NEW: Split by other common delimiters for subtitles/taglines
+    
+        # 1. Exclamation Mark (often ends the main title)
+    
+        if "!" in clean_name:
+    
+            candidates.extend([p.strip() for p in clean_name.split("!")])
+    
+    
+    
+        # 2. Colon (often separates Title: Subtitle)
+    
+        if ":" in clean_name:
+    
+            candidates.extend([p.strip() for p in clean_name.split(":")])
+    
+    
+    
+        # 3. Hyphen surrounded by spaces (Title - Subtitle)
+    
+        if " - " in clean_name:
+    
+            candidates.extend([p.strip() for p in clean_name.split(" - ")])
+    
+    
+    
+        # 4. Handle leading "The " if it wasn't stripped by semantic_normalize (for candidates generation)
+    
+        if clean_name.lower().startswith("the "):
+    
+            candidates.append(clean_name[4:].strip())
+    
+    
+    
+        # Normalize all candidates
+    
+        norm_candidates = [semantic_normalize(c) for c in candidates if c.strip()]
+    
+        
+    
+        # Reset best match tracking for this pass
+    
+        best_match = None
+    
+        best_ratio = 0.0
+    
+    
+    
+        for cat in library.categories:
+    
+            for sub in cat.sub_categories:
+    
+                for s in sub.series:
+    
+                    norm_s_name = semantic_normalize(s.name)
+    
+                    if not norm_s_name: continue
+    
+                    
+    
+                    for norm_t_name in norm_candidates:
+    
+                        if not norm_t_name: continue
+    
+    
+    
+                        # 1. Exact Match (Normalized)
+    
+                        if norm_s_name == norm_t_name:
+    
+                            return s
+    
+                        
+    
+                        # 2. Fuzzy Match
+    
+                        ratio = difflib.SequenceMatcher(None, norm_t_name, norm_s_name).ratio() * 100
+    
+                        if ratio > best_ratio:
+    
+                            # Enforce number consistency for high-confidence fuzzy matches
+    
+                            if ratio >= FUZZY_MATCH_THRESHOLD:
+    
+                                nums_a = [int(n) for n in re.findall(r'\d+', norm_t_name)]
+    
+                                nums_b = [int(n) for n in re.findall(r'\d+', norm_s_name)]
+    
+                                if nums_a != nums_b:
+    
+                                    continue
+    
+    
+    
+                            best_ratio = ratio
+    
+                            if ratio >= FUZZY_MATCH_THRESHOLD:
+    
+                                best_match = s
+    
+    
+    
+        return best_match
 
 def vibe_format_range(numbers: List[float], prefix: str = "", pad: int = 0) -> str:
     """Formats a list of numbers into a consistent string (e.g., v01, 001.5)."""
@@ -355,182 +516,91 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
 
     current_idx = start_idx
     total_added_count = 0
-    last_was_skip = False
+    groups_processed = 0
+    groups_skipped = 0
     
-    while current_idx < len(manga_groups):
-        group = manga_groups[current_idx]
+    with console.status("[bold blue]Initializing grab process...[/bold blue]") as status:
+        while current_idx < len(manga_groups):
+            group = manga_groups[current_idx]
 
-        # Identify group files
-        group_files = []
-        group_names = set(group["parsed_name"])
-        for e in data:
-            if any(n in group_names for n in e.get("parsed_name", [])):
-                group_files.append(e)
+            # Identify group files
+            group_files = []
+            group_names = set(group["parsed_name"])
+            for e in data:
+                if any(n in group_names for n in e.get("parsed_name", [])):
+                    group_files.append(e)
 
-        match_id = group.get("matched_id")
-        local_series = series_map.get(match_id) if match_id else None
+            match_id = group.get("matched_id")
+            local_series = series_map.get(match_id) if match_id else None
 
-        # Fallback: Try real-time matching if not found (using robust clean name logic)
-        if not local_series and library:
-            for clean_name in group.get("parsed_name", []):
-                # Try exact/fuzzy match with the clean name
-                found = find_series_match(clean_name, library)
-                if found:
-                    local_series = found
-                    # Update matched_name for display
-                    group['matched_name'] = found.name
-                    break
+            # Fallback: Try real-time matching if not found (using robust clean name logic)
+            if not local_series and library:
+                for clean_name in group.get("parsed_name", []):
+                    # Try exact/fuzzy match with the clean name
+                    found = find_series_match(clean_name, library)
+                    if found:
+                        local_series = found
+                        # Update matched_name for display
+                        group['matched_name'] = found.name
+                        break
 
-        # Pre-calculate content analysis for auto-skip
-        l_v_nums, l_c_nums = [], []
-        l_v_set, l_c_set = set(), set()
-        new_v, new_c = set(), set()
-        max_torrent_bytes = 0
+            # Pre-calculate content analysis for auto-skip
+            l_v_nums, l_c_nums = [], []
+            l_v_set, l_c_set = set(), set()
+            new_v, new_c = set(), set()
+            max_torrent_bytes = 0
         
-        if local_series:
-            all_local_vols = local_series.volumes + [v for sg in local_series.sub_groups for v in sg.volumes]
-            for v in all_local_vols:
-                v_n, c_n, u_n = classify_unit(v.name)
-                l_v_nums.extend(v_n); l_c_nums.extend(c_n + u_n)
-            
-            l_v_set = set(l_v_nums)
-            l_c_set = set(l_c_nums)
-            
-            for f in group_files:
-                # Skip already processed files from content analysis
-                if f.get("grab_status") in ["grabbed", "skipped", "pulled"]:
-                    continue
-
-                t_bytes = parse_size(f.get("size"))
-                if t_bytes > max_torrent_bytes:
-                    max_torrent_bytes = t_bytes
-
-                v_s, v_e = f.get("volume_begin"), f.get("volume_end")
-                if v_s is not None:
-                    try:
-                        s, e = float(v_s), float(v_e or v_s)
-                        if s.is_integer() and e.is_integer():
-                            for n in range(int(s), int(e) + 1):
-                                if float(n) not in l_v_set: new_v.add(float(n))
-                        else:
-                            if s not in l_v_set: new_v.add(s)
-                            if e not in l_v_set: new_v.add(e)
-                    except (ValueError, TypeError): pass
+            if local_series:
+                all_local_vols = local_series.volumes + [v for sg in local_series.sub_groups for v in sg.volumes]
+                for v in all_local_vols:
+                    v_n, c_n, u_n = classify_unit(v.name)
+                    l_v_nums.extend(v_n); l_c_nums.extend(c_n + u_n)
                 
-                c_s, c_e = f.get("chapter_begin"), f.get("chapter_end")
-                if c_s is not None:
-                    try:
-                        s, e = float(c_s), float(c_e or c_s)
-                        if s.is_integer() and e.is_integer():
-                            for n in range(int(s), int(e) + 1):
-                                if float(n) not in l_c_set: new_c.add(float(n))
-                        else:
-                            if s not in l_c_set: new_c.add(s)
-                            if e not in l_c_set: new_c.add(e)
-                    except (ValueError, TypeError): pass
-
-            # Auto-skip if no new content
-            if not new_v and not new_c:
-                console.print(f"[dim]Auto-skipping Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (No new content or already processed)[/dim]\x1b[K", end="\r")
-                last_was_skip = True
+                l_v_set = set(l_v_nums)
+                l_c_set = set(l_c_nums)
+                
                 for f in group_files:
-                    if not f.get("grab_status"):
-                        f["grab_status"] = "skipped"
-                
-                try:
-                    with open(input_file, 'w', encoding='utf-8') as f:
-                        json.dump(data, f, indent=2)
-                except Exception as e:
-                    console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
-                
-                current_idx += 1
-                continue
+                    # Skip already processed files from content analysis
+                    if f.get("grab_status") in ["grabbed", "skipped", "pulled"]:
+                        continue
 
-        # Auto-Add Logic
-        if auto_add or auto_add_only:
-            if max_downloads is not None and total_added_count >= max_downloads:
-                if last_was_skip:
-                    console.print()
-                console.print(f"[yellow]Max downloads limit ({max_downloads}) reached. Stopping.[/yellow]")
-                return
+                    t_bytes = parse_size(f.get("size"))
+                    if t_bytes > max_torrent_bytes:
+                        max_torrent_bytes = t_bytes
 
-            def is_jxl(f):
-                n = f.get("name", "").lower()
-                return "jxl" in n or "jpeg-xl" in n or "jpegxl" in n
-            
-            def is_completed(f):
-                return "completed" in f.get("name", "").lower()
-
-            # Sort: Prefer Non-JXL (True > False), then Seeders
-            sorted_group_files = sorted(
-                group_files, 
-                key=lambda x: (not is_jxl(x), int(x.get("seeders", 0))), 
-                reverse=True
-            )
-            
-            files_to_auto_add = []
-            volumes_handled_in_group = set()
-            added_via_completed = False
-
-            for f in sorted_group_files:
-                if f.get("grab_status") in ["grabbed", "skipped", "pulled"]:
-                    continue
-
-                v_nums, _, _ = classify_unit(f.get("name", ""))
-                
-                # Criterion 1: New Volumes
-                if v_nums:
-                    # Criteria: Must have volumes not in local library
-                    new_vols_in_file = [v for v in v_nums if v not in l_v_set]
-                    
-                    if not local_series or new_vols_in_file:
-                        # For new series, all volumes are "new"
-                        v_to_check = v_nums if not local_series else new_vols_in_file
-                        
-                        # Check if this torrent provides any volumes we haven't already decided to grab in this group
-                        if any(v not in volumes_handled_in_group for v in v_to_check):
-                            grabbing_str = format_ranges(v_to_check)
-                            if not local_series:
-                                reason = f"New series, grabbing volumes {grabbing_str}"
+                    v_s, v_e = f.get("volume_begin"), f.get("volume_end")
+                    if v_s is not None:
+                        try:
+                            s, e = float(v_s), float(v_e or v_s)
+                            if s.is_integer() and e.is_integer():
+                                for n in range(int(s), int(e) + 1):
+                                    if float(n) not in l_v_set: new_v.add(float(n))
                             else:
-                                local_str = format_ranges(list(l_v_set))
-                                if len(local_str) > 30: local_str = local_str[:27] + "..."
-                                reason = f"Existing volumes {local_str}, grabbing {grabbing_str}"
-                            
-                            files_to_auto_add.append((f, reason))
-                            volumes_handled_in_group.update(v_to_check)
-                            continue # Move to next file
-                
-                # Criterion 2: New Series + "Completed" tag (Handles Chapter-only series)
-                if not local_series and is_completed(f) and not added_via_completed:
-                    # Check if we already grabbed a 'completed' set (or volumes) to avoid duplicates
-                    # If it's a chapter-only series, volumes_handled_in_group will be empty.
-                    files_to_auto_add.append((f, "New completed series"))
-                    added_via_completed = True
-            
-            if files_to_auto_add:
-                if last_was_skip:
-                    console.print()
-                    last_was_skip = False
-                console.print(f"[bold blue]Auto-Adding {len(files_to_auto_add)} torrent(s) for: {', '.join(group['parsed_name'])}[/bold blue]")
-                added_count = 0
-                for f, reason in files_to_auto_add:
-                    if max_downloads is not None and total_added_count >= max_downloads:
-                        console.print(f"[yellow]Max downloads limit ({max_downloads}) reached. Stopping.[/yellow]")
-                        return
+                                if s not in l_v_set: new_v.add(s)
+                                if e not in l_v_set: new_v.add(e)
+                        except (ValueError, TypeError): pass
+                    
+                    c_s, c_e = f.get("chapter_begin"), f.get("chapter_end")
+                    if c_s is not None:
+                        try:
+                            s, e = float(c_s), float(c_e or c_s)
+                            if s.is_integer() and e.is_integer():
+                                for n in range(int(s), int(e) + 1):
+                                    if float(n) not in l_c_set: new_c.add(float(n))
+                            else:
+                                if s not in l_c_set: new_c.add(s)
+                                if e not in l_c_set: new_c.add(e)
+                        except (ValueError, TypeError): pass
 
-                    magnet = f.get("magnet_link")
-                    if magnet:
-                        if qbit.add_torrent([magnet], tag=QBIT_DEFAULT_TAG, savepath=QBIT_DEFAULT_SAVEPATH):
-                            console.print(f"[green] + Added: {f.get('name')}[/green]")
-                            console.print(f"   [dim]Reason: {reason}[/dim]")
-                            f["grab_status"] = "grabbed"
-                            added_count += 1
-                            total_added_count += 1
-                        else:
-                            console.print(f"[red] - Failed to add: {f.get('name')}[/red]")
-                
-                if added_count > 0:
+                # Auto-skip if no new content
+                if not new_v and not new_c:
+                    # Update status with transient message (no permanent output)
+                    status.update(f"[dim]Processing Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (No new content - skipping)[/dim]")
+                    groups_skipped += 1
+                    for f in group_files:
+                        if not f.get("grab_status"):
+                            f["grab_status"] = "skipped"
+                    
                     try:
                         with open(input_file, 'w', encoding='utf-8') as f:
                             json.dump(data, f, indent=2)
@@ -539,134 +609,176 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                     
                     current_idx += 1
                     continue
-        
-        if auto_add_only:
-             console.print(f"[dim]Skipping Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (Auto-add criteria not met)[/dim]\x1b[K", end="\r")
-             last_was_skip = True
-             current_idx += 1
-             continue
 
-        if last_was_skip:
-            console.print()
-            last_was_skip = False
+            # Auto-Add Logic
+            if auto_add or auto_add_only:
+                if max_downloads is not None and total_added_count >= max_downloads:
+                    console.print(f"\n[yellow]Max downloads limit ({max_downloads}) reached. Stopping.[/yellow]")
+                    return
 
-        console.print(Rule(style="dim"))
-        # Show selection info
-        console.print(Panel(f"[bold cyan]Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])}[/bold cyan]"))
-        
-        if group.get("matched_name"):
-            console.print(f"[green]Library Match: {group['matched_name']}[/green]")
+                def is_jxl(f):
+                    n = f.get("name", "").lower()
+                    return "jxl" in n or "jpeg-xl" in n or "jpegxl" in n
+                
+                def is_completed(f):
+                    return "completed" in f.get("name", "").lower()
+
+                # Sort: Prefer Non-JXL (True > False), then Seeders
+                sorted_group_files = sorted(
+                    group_files, 
+                    key=lambda x: (not is_jxl(x), int(x.get("seeders", 0))), 
+                    reverse=True
+                )
             
-            if local_series:
-                # Use pre-calculated values
-                l_vols = format_ranges(l_v_nums)
-                l_chaps = format_ranges(l_c_nums)
-                size_str = format_size(local_series.total_size_bytes)
-                console.print(f"[bold yellow]Local Content: Vols: {l_vols} | Chaps: {l_chaps} | Size: {size_str}[/bold yellow]")
+                files_to_auto_add = []
+                volumes_handled_in_group = set()
+                added_via_completed = False
 
-                msg_parts = []
-                if new_v or new_c:
-                    part = "[bold green]NEW CONTENT AVAILABLE:"
-                    if new_v:
-                        part += f" [{len(new_v)} new vols: {format_ranges(list(new_v))}]"
-                    if new_c:
-                        part += f" [{len(new_c)} new chaps: {format_ranges(list(new_c))}]"
-                    part += "[/bold green]"
-                    msg_parts.append(part)
-            
-                # Size hints
-                diff = max_torrent_bytes - local_series.total_size_bytes
-                if max_torrent_bytes > local_series.total_size_bytes * 1.1:
-                    msg_parts.append(f"[bold cyan]LARGER CONTENT: [+{format_size(diff)}][/bold cyan]")
-                elif not new_v and not new_c and max_torrent_bytes < local_series.total_size_bytes * 0.5:
-                    # Only show smaller if detection failed for EVERYTHING in the group
-                    vols_avail = group.get("consolidated_volumes")
-                    chaps_avail = group.get("consolidated_chapters")
-                    if not vols_avail and not chaps_avail:
-                        msg_parts.append(f"[bold magenta]SMALLER CONTENT: [{format_size(diff)}][/bold magenta]")
-
-                if msg_parts:
-                    console.print(" ".join(msg_parts))
-        
-        vols = ", ".join(group.get("consolidated_volumes", []))
-        chaps = ", ".join(group.get("consolidated_chapters", []))
-        console.print(f"[dim]Scraped Avail: Vols: {vols if vols else 'None'} | Chapters: {chaps if chaps else 'None'}[/dim]")
-
-        table = Table(title="Available Torrents", box=box.SIMPLE)
-        table.add_column("ID", justify="right", style="dim")
-        table.add_column("Name", style="white")
-        table.add_column("Size", justify="right", style="green")
-        table.add_column("Seed", justify="right", style="yellow")
-        table.add_column("Status", justify="center")
-
-        for i, f in enumerate(group_files):
-            status_val = f.get("grab_status", "-")
-            table.add_row(str(i+1), f.get("name"), f.get("size"), str(f.get("seeders")), status_val)
-        
-        console.print(table)
-        
-        choice = click.prompt("Enter ID(s) to grab (e.g. 1,2,3 or 'all'), 's' to skip, 'n' to next, or 'q' to quit", default="n")
-        choice_clean = choice.lower().strip()
-        
-        if choice_clean == 'q':
-            break
-        elif choice_clean == 'n':
-            current_idx += 1
-            continue
-        elif choice_clean == 's':
-            # Flag all in group as skipped
-            for f in group_files:
-                f["grab_status"] = "skipped"
-            console.print("[yellow]Group marked as skipped.[/yellow]")
-            
-            # Save updated data
-            try:
-                with open(input_file, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2)
-            except Exception as e:
-                console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
-            
-            current_idx += 1
-            continue
-            
-        # Parse IDs
-        selected_indices = []
-        if choice_clean == 'all':
-            selected_indices = list(range(len(group_files)))
-        else:
-            # Handle both single digits and comma-separated
-            parts = choice_clean.split(",")
-            for p in parts:
-                p = p.strip()
-                if p.isdigit():
-                    selected_indices.append(int(p) - 1)
-        
-        if selected_indices:
-            added_any = False
-            for idx in selected_indices:
-                if 0 <= idx < len(group_files):
-                    selected = group_files[idx]
-                    
-                    # Skip if already grabbed
-                    if selected.get("grab_status") == "grabbed":
-                        console.print(f"[dim]ID {idx+1} already grabbed, skipping.[/dim]")
+                for f in sorted_group_files:
+                    if f.get("grab_status") in ["grabbed", "skipped", "pulled"]:
                         continue
 
-                    magnet = selected.get("magnet_link")
-                    if not magnet:
-                        console.print(f"[red]No magnet link found for ID {idx+1}.[/red]")
-                        continue
+                    v_nums, _, _ = classify_unit(f.get("name", ""))
                     
-                    if qbit.add_torrent([magnet], tag=QBIT_DEFAULT_TAG, savepath=QBIT_DEFAULT_SAVEPATH):
-                        console.print(f"[bold green]Successfully added to qBittorrent: {selected.get('name')}[/bold green]")
-                        selected["grab_status"] = "grabbed"
-                        added_any = True
-                    else:
-                        console.print(f"[red]Failed to add torrent ID {idx+1} to qBittorrent.[/red]")
-                else:
-                    console.print(f"[red]Invalid ID: {idx+1}[/red]")
+                    # Criterion 1: New Volumes
+                    if v_nums:
+                        # Criteria: Must have volumes not in local library
+                        new_vols_in_file = [v for v in v_nums if v not in l_v_set]
+                        
+                        if not local_series or new_vols_in_file:
+                            # For new series, all volumes are "new"
+                            v_to_check = v_nums if not local_series else new_vols_in_file
+                            
+                            # Check if this torrent provides any volumes we haven't already decided to grab in this group
+                            if any(v not in volumes_handled_in_group for v in v_to_check):
+                                grabbing_str = format_ranges(v_to_check)
+                                if not local_series:
+                                    reason = f"New series, grabbing volumes {grabbing_str}"
+                                else:
+                                    local_str = format_ranges(list(l_v_set))
+                                    if len(local_str) > 30: local_str = local_str[:27] + "..."
+                                    reason = f"Existing volumes {local_str}, grabbing {grabbing_str}"
+                                
+                                files_to_auto_add.append((f, reason))
+                                volumes_handled_in_group.update(v_to_check)
+                                continue # Move to next file
+                
+                    # Criterion 2: New Series + "Completed" tag (Handles Chapter-only series)
+                    if not local_series and is_completed(f) and not added_via_completed:
+                        # Check if we already grabbed a 'completed' set (or volumes) to avoid duplicates
+                        # If it's a chapter-only series, volumes_handled_in_group will be empty.
+                        files_to_auto_add.append((f, "New completed series"))
+                        added_via_completed = True
             
-            if added_any:
+                if files_to_auto_add:
+                    # Print permanent message for additions
+                    console.print(f"\n[bold blue]Auto-Adding {len(files_to_auto_add)} torrent(s) for: {', '.join(group['parsed_name'])}[/bold blue]")
+                    added_count = 0
+                    for f, reason in files_to_auto_add:
+                        if max_downloads is not None and total_added_count >= max_downloads:
+                            console.print(f"[yellow]Max downloads limit ({max_downloads}) reached. Stopping.[/yellow]")
+                            return
+
+                        magnet = f.get("magnet_link")
+                        if magnet:
+                            if qbit.add_torrent([magnet], tag=QBIT_DEFAULT_TAG, savepath=QBIT_DEFAULT_SAVEPATH):
+                                console.print(f"[green]✓ Added: {f.get('name')}[/green] [dim]({reason})[/dim]")
+                                f["grab_status"] = "grabbed"
+                                added_count += 1
+                                total_added_count += 1
+                            else:
+                                console.print(f"[red] - Failed to add: {f.get('name')}[/red]")
+                    
+                    if added_count > 0:
+                        try:
+                            with open(input_file, 'w', encoding='utf-8') as f:
+                                json.dump(data, f, indent=2)
+                        except Exception as e:
+                            console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
+                        
+                        current_idx += 1
+                        continue
+        
+                if auto_add_only:
+                    # Update status with transient message (no permanent output)
+                    status.update(f"[dim]Processing Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])} (Auto-add criteria not met - skipping)[/dim]")
+                    groups_skipped += 1
+                    current_idx += 1
+                    continue
+
+            # Exit status context before interactive mode
+            # This ensures the interactive prompt appears correctly
+            status.stop()
+
+            console.print(Rule(style="dim"))
+            # Show selection info
+            console.print(Panel(f"[bold cyan]Group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])}[/bold cyan]"))
+            
+            if group.get("matched_name"):
+                console.print(f"[green]Library Match: {group['matched_name']}[/green]")
+                
+                if local_series:
+                    # Use pre-calculated values
+                    l_vols = format_ranges(l_v_nums)
+                    l_chaps = format_ranges(l_c_nums)
+                    size_str = format_size(local_series.total_size_bytes)
+                    console.print(f"[bold yellow]Local Content: Vols: {l_vols} | Chaps: {l_chaps} | Size: {size_str}[/bold yellow]")
+
+                    msg_parts = []
+                    if new_v or new_c:
+                        part = "[bold green]NEW CONTENT AVAILABLE:"
+                        if new_v:
+                            part += f" [{len(new_v)} new vols: {format_ranges(list(new_v))}]"
+                        if new_c:
+                            part += f" [{len(new_c)} new chaps: {format_ranges(list(new_c))}]"
+                        part += "[/bold green]"
+                        msg_parts.append(part)
+                
+                    # Size hints
+                    diff = max_torrent_bytes - local_series.total_size_bytes
+                    if max_torrent_bytes > local_series.total_size_bytes * 1.1:
+                        msg_parts.append(f"[bold cyan]LARGER CONTENT: [+{format_size(diff)}][/bold cyan]")
+                    elif not new_v and not new_c and max_torrent_bytes < local_series.total_size_bytes * 0.5:
+                        # Only show smaller if detection failed for EVERYTHING in the group
+                        vols_avail = group.get("consolidated_volumes")
+                        chaps_avail = group.get("consolidated_chapters")
+                        if not vols_avail and not chaps_avail:
+                            msg_parts.append(f"[bold magenta]SMALLER CONTENT: [{format_size(diff)}][/bold magenta]")
+
+                    if msg_parts:
+                        console.print(" ".join(msg_parts))
+            
+            vols = ", ".join(group.get("consolidated_volumes", []))
+            chaps = ", ".join(group.get("consolidated_chapters", []))
+            console.print(f"[dim]Scraped Avail: Vols: {vols if vols else 'None'} | Chapters: {chaps if chaps else 'None'}[/dim]")
+
+            table = Table(title="Available Torrents", box=box.SIMPLE)
+            table.add_column("ID", justify="right", style="dim")
+            table.add_column("Name", style="white")
+            table.add_column("Size", justify="right", style="green")
+            table.add_column("Seed", justify="right", style="yellow")
+            table.add_column("Status", justify="center")
+
+            for i, f in enumerate(group_files):
+                status_val = f.get("grab_status", "-")
+                table.add_row(str(i+1), f.get("name"), f.get("size"), str(f.get("seeders")), status_val)
+            
+            console.print(table)
+            
+            choice = click.prompt("Enter ID(s) to grab (e.g. 1,2,3 or 'all'), 's' to skip, 'n' to next, or 'q' to quit", default="n")
+            choice_clean = choice.lower().strip()
+            
+            if choice_clean == 'q':
+                break
+            elif choice_clean == 'n':
+                current_idx += 1
+                continue
+            elif choice_clean == 's':
+                # Flag all in group as skipped
+                for f in group_files:
+                    f["grab_status"] = "skipped"
+                console.print("[yellow]Group marked as skipped.[/yellow]")
+                
                 # Save updated data
                 try:
                     with open(input_file, 'w', encoding='utf-8') as f:
@@ -675,14 +787,67 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                     console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
                 
                 current_idx += 1
-        else:
-            console.print("[red]Invalid input. Use IDs (e.g. 1,2), 'all', 's', 'n', or 'q'.[/red]")
+                continue
+                
+            # Parse IDs
+            selected_indices = []
+            if choice_clean == 'all':
+                selected_indices = list(range(len(group_files)))
+            else:
+                # Handle both single digits and comma-separated
+                parts = choice_clean.split(",")
+                for p in parts:
+                    p = p.strip()
+                    if p.isdigit():
+                        selected_indices.append(int(p) - 1)
+            
+            if selected_indices:
+                added_any = False
+                for idx in selected_indices:
+                    if 0 <= idx < len(group_files):
+                        selected = group_files[idx]
+                        
+                        # Skip if already grabbed
+                        if selected.get("grab_status") == "grabbed":
+                            console.print(f"[dim]ID {idx+1} already grabbed, skipping.[/dim]")
+                            continue
 
-    if last_was_skip:
-        console.print()
+                        magnet = selected.get("magnet_link")
+                        if not magnet:
+                            console.print(f"[red]No magnet link found for ID {idx+1}.[/red]")
+                            continue
+                        
+                        if qbit.add_torrent([magnet], tag=QBIT_DEFAULT_TAG, savepath=QBIT_DEFAULT_SAVEPATH):
+                            console.print(f"[bold green]Successfully added to qBittorrent: {selected.get('name')}[/bold green]")
+                            selected["grab_status"] = "grabbed"
+                            added_any = True
+                        else:
+                            console.print(f"[red]Failed to add torrent ID {idx+1} to qBittorrent.[/red]")
+                    else:
+                        console.print(f"[red]Invalid ID: {idx+1}[/red]")
+                
+                if added_any:
+                    # Save updated data
+                    try:
+                        with open(input_file, 'w', encoding='utf-8') as f:
+                            json.dump(data, f, indent=2)
+                    except Exception as e:
+                        console.print(f"[red]Error saving updates to {input_file}: {e}[/red]")
+                    
+                    current_idx += 1
+            else:
+                console.print("[red]Invalid input. Use IDs (e.g. 1,2), 'all', 's', 'n', or 'q'.[/red]")
 
-    if current_idx >= len(manga_groups):
-        console.print("[green]Reached the end of the match list.[/green]")
+        # Print final summary
+        if groups_processed > 0 or groups_skipped > 0:
+            console.print(f"\n[bold green]Processing complete![/bold green]")
+            console.print(f"[dim]Total groups processed: {groups_processed + groups_skipped}[/dim]")
+            if groups_skipped > 0:
+                console.print(f"[dim]Groups skipped (no new content): {groups_skipped}[/dim]")
+            if total_added_count > 0:
+                console.print(f"[bold green]Torrents added: {total_added_count}[/bold green]")
+        elif current_idx >= len(manga_groups):
+            console.print("[green]Reached the end of the match list.[/green]")
 
 def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "", input_file: str = "") -> None:
     """

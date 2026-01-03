@@ -77,7 +77,7 @@ FALLBACK_NUMBER_REGEX = re.compile(r'\b(\d+(?:\.\d+)?)\b')
 IMPLICIT_RANGE_REGEX = re.compile(r'\b(\d+(?:\.\d+)?)\s*[-~]\s*(\d+(?:\.\d+)?)\b')
 
 # Patterns to strip BEFORE parsing numbers
-NOISE_PATTERNS = [
+STRIP_PATTERNS = [
     re.compile(r'\(\s*(?:19|20)\d{2}\s*\)'),  # Years in parens: (2021)
     re.compile(r'\[\s*(?:19|20)\d{2}\s*\]'),  # Years in brackets: [2021]
     re.compile(r'\b(?:Season|S)\s*\d+', re.IGNORECASE), # Season 1, S01
@@ -89,6 +89,10 @@ NOISE_PATTERNS = [
     re.compile(r'\d+%', re.IGNORECASE),                  # Percentages: 100%
     re.compile(r'\d+\s*[:꞉：]\s*\d+', re.IGNORECASE),    # Time-like patterns: 23:45, 10:00 (Standard, Modifier, Fullwidth)
     re.compile(r'\bNo\.\s*\d+', re.IGNORECASE),          # No. 8, No. 6
+]
+
+# Patterns specifically for number parsing (includes series titles that look like numbers)
+NOISE_PATTERNS = STRIP_PATTERNS + [
     re.compile(r'\bRanma\s*1\s*2\b', re.IGNORECASE),    # Special case for Ranma 1 2
     re.compile(r'\b5-toubun\b', re.IGNORECASE),          # 5-toubun no Hanayome
     re.compile(r'\b20th\s*Century\s*Boys\b', re.IGNORECASE),
@@ -138,6 +142,25 @@ def extract_number(name: str) -> float:
     if c: return c[0]
     if u: return u[0]
     return -1.0
+
+def strip_volume_info(name: str) -> str:
+    """
+    Removes volume/chapter patterns and noise from the name.
+    Useful for extracting the raw series title from a filename.
+    """
+    s = name
+    # 1. Strip Generic Noise (but keep series titles)
+    for pattern in STRIP_PATTERNS:
+        s = pattern.sub(" ", s)
+    
+    # 2. Strip Vol/Ch/Unit
+    # We use the regexes defined for classification to strip the matches
+    s = VOL_REGEX.sub(" ", s)
+    s = CH_REGEX.sub(" ", s)
+    s = UNIT_REGEX.sub(" ", s)
+    s = IMPLICIT_RANGE_REGEX.sub(" ", s)
+    
+    return s.strip()
 
 def mask_volume_info(name: str) -> str:
     s = name.lower()
@@ -239,8 +262,20 @@ def semantic_normalize(name: str) -> str:
     Strips articles, tags, punctuation, and whitespace.
     """
     if not name: return ""
+    
     # 1. Strip tags [...] (...) {...}
-    name = re.sub(r"\[.*?\]|\(.*?\)|\{.*?\}", " ", name)
+    # We replace with space to avoid merging words: "[A][B]" -> "A B"
+    # Logic Update: If stripping tags removes EVERYTHING (e.g. "[Oshi no Ko]"), 
+    # then the tags were likely part of the title.
+    stripped = re.sub(r"\[.*?\]|\(.*?\)|\{.*?\}", " ", name)
+    
+    # Check if we have any alphanumeric content left
+    if not re.search(r"[a-zA-Z0-9]", stripped):
+        # If nothing is left, use the original name (treat tags as content)
+        name = name
+    else:
+        name = stripped
+    
     # 2. Strip articles
     name = re.sub(r"\b(The|A|An|Le|La|Les|Un|Une)\b", " ", name, flags=re.IGNORECASE)
     

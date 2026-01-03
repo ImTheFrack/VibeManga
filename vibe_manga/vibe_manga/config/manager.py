@@ -8,6 +8,7 @@ It replaces scattered environment variable access with a single source of truth.
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
 from pydantic import Field, field_validator, ConfigDict, BaseModel
+# from pydantic_settings import SettingsSourceCallable
 from pydantic_settings import BaseSettings, SettingsConfigDict, PydanticBaseSettingsSource
 
 
@@ -61,7 +62,7 @@ class JikanConfig(BaseSettings):
     rate_limit_delay: float = Field(default=1.2, description="Rate limit delay in seconds")
     timeout: int = Field(default=10, description="API timeout in seconds")
     max_retries: int = Field(default=3, description="Maximum number of retries")
-
+    local_repository_path: Optional[Path] = Field(default=None, description="Path to local Jikan CSV repository")
 
 class CacheConfig(BaseSettings):
     """Configuration for caching behavior"""

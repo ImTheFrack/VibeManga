@@ -3,21 +3,112 @@ import logging
 import time
 import requests
 import difflib
+import csv
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union, Tuple
 
 from .constants import ROLE_CONFIG, REMOTE_AI_API_KEY, AI_MAX_RETRIES
 from .ai_api import call_ai
-from .config import get_ai_role_config
+from .config import get_ai_role_config, get_config
 from .analysis import semantic_normalize
 from .models import SeriesMetadata
+from .cache import load_resolution_cache, save_resolution_cache
 
 logger = logging.getLogger(__name__)
 
 # Jikan API constants
 JIKAN_BASE_URL = "https://api.jikan.moe/v4"
 JIKAN_RATE_LIMIT_DELAY = 1.2  # Increased to 1.2s to be safer
+
+def _parse_csv_list(text: str) -> List[str]:
+    """Parses a string representation of a list from the CSV (e.g., "['Action', 'Comedy']")."""
+    if not text or text == "[]":
+        return []
+    try:
+        # Simple/safe parsing for the expected format
+        cleaned = text.strip("[]").replace("'", "").replace('"', "")
+        return [x.strip() for x in cleaned.split(",")]
+    except Exception:
+        return []
+
+def get_jikan_csv_path() -> Optional[Path]:
+    """Resolves the path to the local Jikan CSV repository."""
+    # Check config first
+    cfg_path = get_config().jikan.local_repository_path
+    if cfg_path and cfg_path.exists():
+        return cfg_path
+    
+    # Fallback to default location in project root/env
+    default_path = Path("manga.csv")
+    if default_path.exists():
+        return default_path
+        
+    return None
+
+def fetch_from_local_csv(mal_id: int) -> Optional[SeriesMetadata]:
+    """Attempts to find a MAL ID in the local CSV repository."""
+    csv_path = get_jikan_csv_path()
+    if not csv_path:
+        return None
+        
+    try:
+        # Optimization: Scanning a large CSV line by line is slow but memory efficient.
+        # Ideally we'd index this, but for now we scan.
+        with open(csv_path, 'r', encoding='utf-8', errors='replace') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    if int(row['id']) == mal_id:
+                        return _parse_csv_row(row)
+                except (ValueError, KeyError):
+                    continue
+    except Exception as e:
+        logger.warning(f"Error reading local Jikan CSV: {e}")
+        
+    return None
+
+def _parse_csv_row(row: Dict[str, str]) -> SeriesMetadata:
+    """Parses a CSV row into SeriesMetadata."""
+    
+    # Status Normalization
+    status_map = {
+        "Finished": "Completed",
+        "Publishing": "Ongoing",
+        "On Hiatus": "Hiatus",
+        "Discontinued": "Cancelled",
+        "Not yet published": "Upcoming"
+    }
+    raw_status = row.get("status", "Unknown")
+    status = status_map.get(raw_status, raw_status)
+
+    # Date parsing for year
+    year = None
+    pub_date = row.get("publishing_date", "")
+    if pub_date:
+        # Format usually "Oct 4, 2002 to ?" or "2002 to ?"
+        import re
+        m = re.search(r'\d{4}', pub_date)
+        if m:
+            year = int(m.group(0))
+
+    return SeriesMetadata(
+        title=row.get("title_name") or row.get("english_name") or "Unknown",
+        title_english=row.get("english_name"),
+        title_japanese=row.get("japanese_name"),
+        synonyms=_parse_csv_list(row.get("synonymns", "")),
+        authors=_parse_csv_list(row.get("authors", "")),
+        synopsis=row.get("description", ""),
+        genres=_parse_csv_list(row.get("genres", "")),
+        tags=_parse_csv_list(row.get("themes", "")),
+        demographics=[row.get("demographic")] if row.get("demographic") else [],
+        status=status,
+        total_volumes=int(float(row["volumes"])) if row.get("volumes") and row["volumes"] != "Unknown" else None,
+        total_chapters=int(float(row["chapters"])) if row.get("chapters") and row["chapters"] != "Unknown" else None,
+        release_year=year,
+        mal_id=int(row["id"]),
+        anilist_id=None
+    )
 
 def load_local_metadata(series_path: Path) -> Optional[SeriesMetadata]:
     """Loads metadata from series.json in the series directory."""
@@ -50,11 +141,100 @@ def calculate_similarity(query: str, candidate: str) -> float:
         return 0.0
     return difflib.SequenceMatcher(None, query, candidate).ratio()
 
+def fetch_by_id_from_jikan(mal_id: int, status_callback: Optional[callable] = None) -> Optional[SeriesMetadata]:
+    """Fetches metadata for a specific MAL ID from Jikan."""
+    
+    # 1. Try Local CSV Repository
+    local_meta = fetch_from_local_csv(mal_id)
+    if local_meta:
+        logger.info(f"Local CSV Hit for MAL ID {mal_id}")
+        if status_callback:
+            status_callback(f"Found in local CSV repository.")
+        return local_meta
+
+    # 2. Fallback to API
+    url = f"{JIKAN_BASE_URL}/manga/{mal_id}"
+    try:
+        if status_callback:
+            status_callback(f"Fetching ID {mal_id} from Jikan...")
+        time.sleep(JIKAN_RATE_LIMIT_DELAY)
+        
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        
+        data = resp.json().get("data")
+        if not data:
+            return None
+            
+        return _parse_jikan_result(data, query=f"ID:{mal_id}")
+    except Exception as e:
+        logger.error(f"Failed to fetch MAL ID {mal_id}: {e}")
+        return None
+
+def _parse_jikan_result(result: Dict[str, Any], query: str = "") -> SeriesMetadata:
+    """Parses a Jikan API result dict into SeriesMetadata."""
+    authors = [a["name"] for a in result.get("authors", [])]
+    genres = [g["name"] for g in result.get("genres", [])]
+    themes = [t["name"] for t in result.get("themes", [])] # Treat themes as tags
+    demographics = [d["name"] for d in result.get("demographics", [])]
+    
+    status_map = {
+        "Finished": "Completed",
+        "Publishing": "Ongoing",
+        "On Hiatus": "Hiatus",
+        "Discontinued": "Cancelled",
+        "Not yet published": "Upcoming"
+    }
+    raw_status = result.get("status", "Unknown")
+    status = status_map.get(raw_status, raw_status)
+
+    main_title = result.get("title_english") or result.get("title", query)
+    t_eng = result.get("title_english")
+    t_jp = result.get("title_japanese")
+    
+    syns = []
+    for t_obj in result.get("titles", []):
+        t_val = t_obj.get("title")
+        if t_val and t_val not in [main_title, t_eng, t_jp]:
+            syns.append(t_val)
+
+    return SeriesMetadata(
+        title=main_title,
+        title_english=t_eng,
+        title_japanese=t_jp,
+        synonyms=syns,
+        authors=authors,
+        synopsis=result.get("synopsis", ""),
+        genres=genres,
+        tags=themes,
+        demographics=demographics,
+        status=status,
+        total_volumes=result.get("volumes"),
+        total_chapters=result.get("chapters"),
+        release_year=result.get("published", {}).get("prop", {}).get("from", {}).get("year"),
+        mal_id=result.get("mal_id"),
+        anilist_id=None
+    )
+
 def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> Optional[SeriesMetadata]:
     """
     Searches Jikan (MAL) for manga metadata.
+    Checks local resolution cache first.
     Returns the best matching result based on similarity score.
     """
+    # 1. Check Resolution Cache
+    cache = load_resolution_cache()
+    if query in cache:
+        mal_id = cache[query]
+        if mal_id:
+            logger.info(f"Resolution Cache Hit: '{query}' -> MAL ID {mal_id}")
+            return fetch_by_id_from_jikan(mal_id, status_callback)
+        else:
+            logger.info(f"Resolution Cache Hit (Negative): '{query}' is known to have no match.")
+            if status_callback:
+                status_callback("[dim]Skipping (Cached Failure)[/dim]")
+            return None
+
     for attempt in range(AI_MAX_RETRIES + 1):
         try:
             if status_callback:
@@ -134,62 +314,36 @@ def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> 
             # Optional: Threshold check? 
             # If the best score is very low (e.g. < 0.4), maybe return None?
             # For now, we trust the relative ranking, but let Supervisor check it.
-            
-            result = best_result
-            
-            # Parse Jikan format into our schema
-            authors = [a["name"] for a in result.get("authors", [])]
-            genres = [g["name"] for g in result.get("genres", [])]
-            themes = [t["name"] for t in result.get("themes", [])] # Treat themes as tags
-            demographics = [d["name"] for d in result.get("demographics", [])]
-            
-            # Normalize status
-            status_map = {
-                "Finished": "Completed",
-                "Publishing": "Ongoing",
-                "On Hiatus": "Hiatus",
-                "Discontinued": "Cancelled",
-                "Not yet published": "Upcoming"
-            }
-            raw_status = result.get("status", "Unknown")
-            status = status_map.get(raw_status, raw_status)
 
-            # Extract titles
-            main_title = result.get("title_english") or result.get("title", query)
-            t_eng = result.get("title_english")
-            t_jp = result.get("title_japanese")
+            # Update Resolution Cache with success
+            try:
+                cache = load_resolution_cache()
+                cache[query] = best_result.get("mal_id")
+                save_resolution_cache(cache)
+            except Exception as e:
+                logger.warning(f"Failed to update resolution cache: {e}")
             
-            # Synonyms
-            syns = []
-            for t_obj in result.get("titles", []):
-                t_val = t_obj.get("title")
-                if t_val and t_val not in [main_title, t_eng, t_jp]:
-                    syns.append(t_val)
-
-            return SeriesMetadata(
-                title=main_title,
-                title_english=t_eng,
-                title_japanese=t_jp,
-                synonyms=syns,
-                authors=authors,
-                synopsis=result.get("synopsis", ""),
-                genres=genres,
-                tags=themes,
-                demographics=demographics,
-                status=status,
-                total_volumes=result.get("volumes"),
-                total_chapters=result.get("chapters"),
-                release_year=result.get("published", {}).get("prop", {}).get("from", {}).get("year"),
-                mal_id=result.get("mal_id"),
-                anilist_id=None # Jikan is MAL only
-            )
+            return _parse_jikan_result(best_result, query)
             
         except Exception as e:
             logger.debug(f"Jikan API failed for '{query}' (Attempt {attempt+1}): {e}")
             if attempt < AI_MAX_RETRIES:
                 time.sleep(1)
                 continue
+            
+            # If we exhausted attempts, cache failure? 
+            # No, maybe network was down. Only cache explicit "No Results".
             return None
+    
+    # If loop finishes without return (e.g. no results found in ANY attempt or empty lists)
+    # We should cache this failure so we don't try again.
+    try:
+        cache = load_resolution_cache()
+        cache[query] = None
+        save_resolution_cache(cache)
+    except Exception as e:
+        logger.warning(f"Failed to update resolution cache: {e}")
+
     return None
 
 

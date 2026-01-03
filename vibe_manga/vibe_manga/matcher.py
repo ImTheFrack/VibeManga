@@ -22,6 +22,7 @@ from . import constants as c
 from .scanner import scan_library
 from .models import Series, Library
 from .indexer import LibraryIndex
+from .metadata import fetch_from_jikan, save_local_metadata
 from .analysis import (
     find_gaps, 
     find_duplicates, 
@@ -33,7 +34,7 @@ from .analysis import (
     classify_unit,
     parse_size
 )
-from .cache import get_cached_library, save_library_cache
+from .cache import get_cached_library, save_library_cache, load_resolution_cache, save_resolution_cache
 
 logger = logging.getLogger(__name__) 
 console = Console()
@@ -718,6 +719,165 @@ def _propagate_matches(entries: List[Dict[str, Any]]) -> int:
                 
     return updated_count
 
+def _resolve_remote_identities(data: List[Dict[str, Any]], library_index: LibraryIndex) -> int:
+    """
+    Attempts to resolve unmatched entries by querying Jikan (MAL) 
+    and checking if the returned ID exists in the local library.
+    
+    Features:
+    - Caches results (success and failure) to avoid repeated API calls.
+    - Updates local series.json with the new synonym if a match is found.
+    """
+    if not library_index or not library_index.is_built:
+        return 0
+
+    # 1. Group unmatched entries by their Clean Name
+    unmatched_groups = {} # name -> list of indices
+    
+    for i, entry in enumerate(data):
+        # Skip if already matched
+        if entry.get("matched_id") or entry.get("matched_path"):
+            continue
+            
+        # Skip ignore types
+        if entry.get("type") in ["Light Novel", "Visual Novel", "Audiobook", "Periodical", "Anthology", "UNDERSIZED"]:
+            continue
+            
+        names = entry.get("parsed_name", [])
+        if not names or any(n.startswith("SKIPPED") for n in names):
+            continue
+            
+        # Use the first parsed name as the query candidate
+        candidate = names[0]
+        if not candidate: continue
+        
+        if candidate not in unmatched_groups:
+            unmatched_groups[candidate] = []
+        unmatched_groups[candidate].append(i)
+
+    if not unmatched_groups:
+        return 0
+
+    # Load resolution cache
+    res_cache = load_resolution_cache()
+    
+    # Identify what needs fetching vs what is cached
+    to_fetch = []
+    
+    # Pre-process cache hits
+    resolved_count = 0
+    resolved_groups = 0
+    cache_hits = 0
+    
+    # We'll collect updates to save at the end
+    cache_updated = False
+    
+    for name, indices in unmatched_groups.items():
+        if name in res_cache:
+            mal_id = res_cache[name]
+            if mal_id: # Cached Success
+                 local_series = library_index.get_by_id(mal_id)
+                 if local_series:
+                    m_path = str(local_series.path)
+                    m_name = local_series.name
+                    for idx in indices:
+                        data[idx]["matched_path"] = m_path
+                        data[idx]["matched_name"] = m_name
+                        data[idx]["matched_id"] = mal_id
+                    resolved_count += len(indices)
+                    resolved_groups += 1
+                    cache_hits += 1
+            else:
+                # Cached Failure (None) - Skip
+                pass
+        else:
+            to_fetch.append(name)
+
+    if not to_fetch and cache_hits == 0:
+        return 0
+
+    if to_fetch:
+        console.print(f"[cyan]Attempting remote resolution for {len(to_fetch)} unmatched groups...[/cyan]")
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console
+        ) as progress:
+            task = progress.add_task("Resolving identities...", total=len(to_fetch))
+            
+            for name in to_fetch:
+                progress.update(task, description=f"Resolving: {name}")
+                
+                # Fetch from Jikan
+                meta = fetch_from_jikan(name)
+                
+                if meta and meta.mal_id:
+                    # Check if this ID exists in our library
+                    local_series = library_index.get_by_id(meta.mal_id)
+                    
+                    if local_series:
+                        # MATCH FOUND!
+                        m_path = str(local_series.path)
+                        m_name = local_series.name
+                        
+                        # 1. Link items
+                        indices = unmatched_groups[name]
+                        for idx in indices:
+                            data[idx]["matched_path"] = m_path
+                            data[idx]["matched_name"] = m_name
+                            data[idx]["matched_id"] = meta.mal_id 
+                        
+                        resolved_count += len(indices)
+                        resolved_groups += 1
+                        
+                        # 2. Update Cache
+                        res_cache[name] = meta.mal_id
+                        cache_updated = True
+                        
+                        # 3. LEARN: Update local series.json with this new synonym
+                        # This prevents future lookups for this name completely!
+                        if name not in local_series.identities:
+                            # Verify it's not already in synonyms list (case-sensitive check)
+                            if name not in local_series.metadata.synonyms:
+                                logger.info(f"Learning new synonym '{name}' for series '{local_series.name}'")
+                                local_series.metadata.synonyms.append(name)
+                                save_local_metadata(local_series.path, local_series.metadata)
+                                # Note: We don't rebuild index here, but next run will catch it locally.
+                    else:
+                        # Jikan found ID, but we don't have it.
+                        # We cache this as "No Match" (None) because strictly speaking, 
+                        # we can't link it to anything in our library.
+                        # Wait... if we cache it as None, we'll never re-check even if we add the series later!
+                        # Better to NOT cache if we just don't have the series?
+                        # OR cache the ID, but since get_by_id returns None, it just behaves as "Not in Library".
+                        # Storing the ID is better info.
+                        res_cache[name] = meta.mal_id
+                        cache_updated = True
+                else:
+                    # Jikan failed or returned no ID. Cache as None to prevent retry.
+                    res_cache[name] = None
+                    cache_updated = True
+                
+                progress.advance(task)
+                
+    if cache_updated:
+        save_resolution_cache(res_cache)
+
+    if resolved_count > 0:
+        msg = f"[green]Remote Resolution: Matched {resolved_groups} groups ({resolved_count} entries) to library.[/green]"
+        if cache_hits > 0:
+            msg += f" [dim](Cached: {cache_hits})[/dim]"
+        console.print(msg)
+    elif cache_hits > 0:
+        console.print(f"[dim]Remote Resolution: No new matches (Cached hits: {cache_hits})[/dim]")
+    else:
+        console.print("[dim]Remote Resolution: No new matches found.[/dim]")
+            
+    return resolved_count
+
 def process_match(input_file: str, output_file: str, show_table: bool, show_all: bool, library: Optional[Library] = None, show_stats: bool = False, query: Optional[str] = None, parallel: bool = True):
     start_time = time.time()
     p = Path(input_file)
@@ -876,6 +1036,10 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
                 else:
                      status_text.plain = f"Processed: {pnames}"
                 progress.advance(task_id)
+
+    # 1.5 Remote Resolution (if library available)
+    if library:
+        _resolve_remote_identities(processed_data, index)
 
     # 2. Integration & ID Generation (Main Process Only)
     # After parallel matching, we need to update the real Library object and generate IDs

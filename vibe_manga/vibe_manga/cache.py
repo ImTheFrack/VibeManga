@@ -169,3 +169,34 @@ def clear_cache(library_root: Path) -> bool:
             logger.error(f"Failed to clear state: {e}")
 
     return cleared
+
+
+def get_resolution_cache_path() -> Path:
+    """Returns the path for the global resolution cache."""
+    return Path.cwd() / "vibe_manga_resolution_cache.json"
+
+
+def load_resolution_cache() -> dict:
+    """Loads the resolution cache (Query -> MAL ID)."""
+    path = get_resolution_cache_path()
+    if not path.exists():
+        return {}
+    
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Failed to load resolution cache: {e}")
+        return {}
+
+
+def save_resolution_cache(cache: dict) -> bool:
+    """Saves the resolution cache."""
+    path = get_resolution_cache_path()
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(cache, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save resolution cache: {e}")
+        return False

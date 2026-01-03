@@ -123,7 +123,8 @@ def generate_rename_op_for_series(
                     sanitize_filename(current_name), 
                     current_name,
                     sanitize_filename(series.name),
-                    series.name
+                    series.name,
+                    target_name, # Add target name to prefixes to check
                 ]
                 
                 for prefix in prefixes_to_check:
