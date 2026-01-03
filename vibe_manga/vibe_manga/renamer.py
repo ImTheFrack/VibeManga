@@ -124,8 +124,10 @@ def generate_rename_op_for_series(
                     current_name,
                     sanitize_filename(series.name),
                     series.name,
-                    target_name, # Add target name to prefixes to check
+                    target_name,
                 ]
+                # Sort by length descending to match longest prefix first
+                prefixes_to_check.sort(key=len, reverse=True)
                 
                 for prefix in prefixes_to_check:
                     if fname.lower().startswith(prefix.lower()):
@@ -206,127 +208,75 @@ def execute_rename_op(op: SeriesRenameOp) -> List[str]:
     msgs = []
     import time
     
-    # Debug Helper
-    def debug_log(msg):
-        # Using print directly for immediate console feedback during debugging
-        # Prefix with [DEBUG] so user can spot it
-        print(f"[DEBUG] {msg}")
-
     # 1. Rename Folder (if needed)
     final_series_path = op.current_path
     
     # FIX: Use string comparison because Path("A") == Path("a") is True on Windows
     if str(op.current_path) != str(op.target_path):
-        debug_log(f"Attempting Folder Rename: '{op.current_path.name}' -> '{op.target_path.name}'")
-        debug_log(f"  Current Path: {op.current_path} (Exists: {op.current_path.exists()})")
-        debug_log(f"  Target Path:  {op.target_path} (Exists: {op.target_path.exists()})")
-        
         # Check collision
         if op.target_path.exists():
-            # If names differ only by case, this 'exists' matches the source itself on Windows.
             is_case_only = op.current_path.name.lower() == op.target_path.name.lower()
-            debug_log(f"  Target exists. Case-only match? {is_case_only}")
-            
-            if is_case_only:
-                # Case-only rename: Use temp strategy
-                pass
-            else:
-                debug_log("  Collision detected (Not case-only). Aborting folder rename.")
+            if not is_case_only:
                 return [f"ERROR: Target folder exists: {op.target_path}"]
             
         try:
             # Case-only rename check
             if op.current_path.name.lower() == op.target_path.name.lower():
-                # Step 1: Rename to temp
                 temp_path = op.current_path.with_name(f"{op.current_path.name}_TEMP_{os.getpid()}")
-                debug_log(f"  [1/2] Renaming to temp: {temp_path}")
                 op.current_path.rename(temp_path)
-                
-                # Step 2: Rename to target
-                debug_log(f"  [2/2] Renaming temp to target: {op.target_path}")
                 temp_path.rename(op.target_path)
             else:
-                # Standard rename
-                debug_log(f"  Standard rename to: {op.target_path}")
                 op.current_path.rename(op.target_path)
 
             final_series_path = op.target_path
-            # Update Series object path/name
             op.series.path = final_series_path
             op.series.name = op.target_name
             msgs.append(f"Renamed folder to: {op.target_name}")
             
-            # Short sleep to ensure FS sync (helps with network drives)
             time.sleep(0.05)
 
         except OSError as e:
-            debug_log(f"  OSError: {e}")
             return [f"ERROR moving folder: {e}"]
 
     # 2. Rename Files
-    # Note: If folder moved, the 'original_path' in file_ops is now invalid if it was absolute.
-    # We must re-base relative to the new parent.
-    
-    if op.file_ops:
-        debug_log(f"Processing {len(op.file_ops)} file renames...")
-
     for f_op in op.file_ops:
         try:
             # Re-base the path
-            # Get relative path of old file from old series root (op.current_path is old root)
             try:
                 rel_path = f_op.original_path.relative_to(op.current_path)
             except ValueError:
-                # Fallback if paths mismatch
                 msgs.append(f"ERROR: Could not relate {f_op.original_path} to {op.current_path}")
                 continue
             
-            # Construct new current path (where it exists NOW on disk)
             current_file_path = final_series_path / rel_path
-            
-            # Construct target path
             target_file_path = current_file_path.parent / f_op.new_filename
             
-            # FIX: Use string comparison here too
             if str(current_file_path) == str(target_file_path):
                 continue
 
-            # Check collision (Pre-check)
+            if not current_file_path.exists():
+                logger.warning(f"Source file not found at expected path, skipping: {current_file_path}")
+                continue
+
             if target_file_path.exists():
-                # Check if it's the SAME file (Aliasing/Case-insensitivity)
                 is_same_file = False
                 try:
                     is_same_file = current_file_path.samefile(target_file_path)
                 except OSError:
-                    pass # Ignore errors, assume different
+                    pass 
                 
                 if is_same_file:
-                     # It's the same file node, just accessed via different name (e.g. Case or Trailing Space on Windows/SMB)
-                     debug_log(f"  File Alias/Case Rename: {rel_path.name} -> {f_op.new_filename}")
+                     # It's the same file node, just accessed via different name (e.g. Case)
                      temp_file = current_file_path.with_name(f"{current_file_path.name}_{os.getpid()}.tmp")
                      current_file_path.rename(temp_file)
                      temp_file.rename(target_file_path)
                 else:
-                    # Real collision (Different files exist)
-                    debug_log(f"  File Collision: {rel_path.name} -> {f_op.new_filename}")
                     msgs.append(f"Skipped file {rel_path.name}: Target exists")
                     continue
             else:
-                # Simple rename (Try/Except for race conditions or hidden existence)
-                try:
-                    current_file_path.rename(target_file_path)
-                except FileExistsError:
-                    debug_log(f"  File Exists Error (183/EEXIST): {rel_path.name}")
-                    msgs.append(f"Skipped file {rel_path.name}: Target exists (Error 183)")
-                except OSError as e:
-                    if e.winerror == 183: # Windows specific FileExistsError
-                        debug_log(f"  WinError 183: {rel_path.name}")
-                        msgs.append(f"Skipped file {rel_path.name}: Target exists (WinError 183)")
-                    else:
-                        raise e
+                current_file_path.rename(target_file_path)
                 
         except Exception as e:
-            debug_log(f"  Exception renaming file {f_op.original_path.name}: {e}")
             msgs.append(f"ERROR renaming file {f_op.original_path.name}: {e}")
             
     return msgs

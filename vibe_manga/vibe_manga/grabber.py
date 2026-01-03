@@ -121,52 +121,57 @@ def find_series_match(torrent_name: str, library: Optional[Any] = None) -> Optio
     best_ratio = 0.0
 
     if norm_full:
+
         for cat in library.categories:
-    
-                for sub in cat.sub_categories:
-    
-                    for s in sub.series:
-    
-                        norm_s_name = semantic_normalize(s.name)
-    
+
+            for sub in cat.sub_categories:
+
+                for s in sub.series:
+
+                    # CHECK ALL IDENTITIES (Folder Name + Metadata Synonyms)
+
+                    for identity in s.identities:
+
+                        norm_s_name = semantic_normalize(identity)
+
                         if not norm_s_name: continue
-    
-    
-    
+
+
+
                         if norm_s_name == norm_full:
-    
+
                             return s
-    
+
                         
-    
+
                         ratio = difflib.SequenceMatcher(None, norm_full, norm_s_name).ratio() * 100
-    
+
                         if ratio > best_ratio:
-    
+
                             if ratio >= FUZZY_MATCH_THRESHOLD:
-    
-                                 # Same number check logic
-    
-                                 nums_a = [int(n) for n in re.findall(r'\d+', norm_full)]
-    
-                                 nums_b = [int(n) for n in re.findall(r'\d+', norm_s_name)]
-    
-                                 if nums_a != nums_b: continue
-    
+
+                                    # Same number check logic
+
+                                    nums_a = [int(n) for n in re.findall(r'\d+', norm_full)]
+
+                                    nums_b = [int(n) for n in re.findall(r'\d+', norm_s_name)]
+
+                                    if nums_a != nums_b: continue
+
                             
-    
+
                             best_ratio = ratio
-    
+
                             if ratio >= FUZZY_MATCH_THRESHOLD:
-    
+
                                 best_match = s
-    
+
         
-    
+
         # If we found a high-confidence match with the full name, return it.
-    
+
         if best_match:
-    
+
             return best_match
     
     
@@ -246,56 +251,114 @@ def find_series_match(torrent_name: str, library: Optional[Any] = None) -> Optio
     
     
         for cat in library.categories:
-    
+
+
+
             for sub in cat.sub_categories:
-    
+
+
+
                 for s in sub.series:
-    
-                    norm_s_name = semantic_normalize(s.name)
-    
-                    if not norm_s_name: continue
-    
-                    
-    
-                    for norm_t_name in norm_candidates:
-    
-                        if not norm_t_name: continue
-    
-    
-    
-                        # 1. Exact Match (Normalized)
-    
-                        if norm_s_name == norm_t_name:
-    
-                            return s
-    
+
+
+
+                    # CHECK ALL IDENTITIES (Folder Name + Metadata Synonyms)
+
+
+
+                    for identity in s.identities:
+
+
+
+                        norm_s_name = semantic_normalize(identity)
+
+
+
+                        if not norm_s_name: continue
+
+
+
                         
+
+
+
+                        for norm_t_name in norm_candidates:
+
+
+
+                            if not norm_t_name: continue
+
+
+
     
-                        # 2. Fuzzy Match
+
+
+
+                            # 1. Exact Match (Normalized)
+
+
+
+                            if norm_s_name == norm_t_name:
+
+
+
+                                return s
+
+
+
+                            
+
+
+
+                            # 2. Fuzzy Match
+
+
+
+                            ratio = difflib.SequenceMatcher(None, norm_t_name, norm_s_name).ratio() * 100
+
+
+
+                            if ratio > best_ratio:
+
+
+
+                                # Enforce number consistency for high-confidence fuzzy matches
+
+
+
+                                if ratio >= FUZZY_MATCH_THRESHOLD:
+
+
+
+                                    nums_a = [int(n) for n in re.findall(r'\d+', norm_t_name)]
+
+
+
+                                    nums_b = [int(n) for n in re.findall(r'\d+', norm_s_name)]
+
+
+
+                                    if nums_a != nums_b:
+
+
+
+                                        continue
+
+
+
     
-                        ratio = difflib.SequenceMatcher(None, norm_t_name, norm_s_name).ratio() * 100
-    
-                        if ratio > best_ratio:
-    
-                            # Enforce number consistency for high-confidence fuzzy matches
-    
-                            if ratio >= FUZZY_MATCH_THRESHOLD:
-    
-                                nums_a = [int(n) for n in re.findall(r'\d+', norm_t_name)]
-    
-                                nums_b = [int(n) for n in re.findall(r'\d+', norm_s_name)]
-    
-                                if nums_a != nums_b:
-    
-                                    continue
-    
-    
-    
-                            best_ratio = ratio
-    
-                            if ratio >= FUZZY_MATCH_THRESHOLD:
-    
-                                best_match = s
+
+
+
+                                best_ratio = ratio
+
+
+
+                                if ratio >= FUZZY_MATCH_THRESHOLD:
+
+
+
+                                    best_match = s
     
     
     

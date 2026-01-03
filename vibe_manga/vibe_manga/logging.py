@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional, Union
 from rich.logging import RichHandler
 from rich.console import Console
+from rich.panel import Panel
 
 
 class VibeMangaError(Exception):
