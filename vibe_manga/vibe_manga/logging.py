@@ -13,6 +13,8 @@ from rich.logging import RichHandler
 from rich.console import Console
 from rich.panel import Panel
 
+# Global console instance for the entire application
+console = Console()
 
 class VibeMangaError(Exception):
     """Base exception for all VibeManga-specific errors."""
@@ -49,7 +51,7 @@ class VibeMangaLogger:
     
     def __init__(self, log_file: str = "vibe_manga.log"):
         self.log_file = log_file
-        self.console = Console()
+        self.console = console
         self._setup_root_logger()
     
     def _setup_root_logger(self) -> None:
@@ -68,6 +70,9 @@ class VibeMangaLogger:
         console_handler = RichHandler(
             console=self.console,
             show_path=False,
+            show_time=True,
+            show_level=True,
+            markup=True,
             keywords=[]
         )
         console_handler.setLevel(logging.WARNING)
@@ -93,17 +98,31 @@ class VibeMangaLogger:
         """
         return logging.getLogger(name)
     
-    def set_console_level(self, level: Union[str, int]) -> None:
+    def set_console_level(self, level: Union[str, int], clean: bool = False) -> None:
         """
         Set the console logging level.
         
         Args:
             level: Logging level (e.g., 'DEBUG', 'INFO', 'WARNING')
+            clean: If True, hides time and level for a cleaner UI-like look
         """
         root_logger = logging.getLogger()
+        
+        # Convert string level to numeric if needed
+        numeric_level = level
+        if isinstance(level, str):
+            numeric_level = getattr(logging, level.upper(), logging.INFO)
+            
+        # Ensure root logger allows this level
+        if numeric_level < root_logger.level:
+            root_logger.setLevel(numeric_level)
+
         for handler in root_logger.handlers:
             if isinstance(handler, RichHandler):
                 handler.setLevel(level)
+                handler.show_time = not clean
+                handler.show_level = not clean
+                handler.markup = True # Ensure markup is enabled
                 break
     
     def set_file_level(self, level: Union[str, int]) -> None:
@@ -114,6 +133,16 @@ class VibeMangaLogger:
             level: Logging level (e.g., 'DEBUG', 'INFO', 'WARNING')
         """
         root_logger = logging.getLogger()
+        
+        # Convert string level to numeric if needed
+        numeric_level = level
+        if isinstance(level, str):
+            numeric_level = getattr(logging, level.upper(), logging.INFO)
+            
+        # Ensure root logger allows this level
+        if numeric_level < root_logger.level:
+            root_logger.setLevel(numeric_level)
+
         for handler in root_logger.handlers:
             if isinstance(handler, logging.FileHandler):
                 handler.setLevel(level)
@@ -159,19 +188,20 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-def set_log_level(level: Union[str, int], handler_type: str = "both") -> None:
+def set_log_level(level: Union[str, int], handler_type: str = "both", clean: bool = False) -> None:
     """
     Set the logging level for console, file, or both handlers.
     
     Args:
         level: Logging level (e.g., 'DEBUG', 'INFO', 'WARNING', 'ERROR')
         handler_type: 'console', 'file', or 'both'
+        clean: If True, hides time and level for console handler
     """
     if _logger_instance is None:
         setup_logging()
     
     if handler_type in ("console", "both"):
-        _logger_instance.set_console_level(level)
+        _logger_instance.set_console_level(level, clean=clean)
     if handler_type in ("file", "both"):
         _logger_instance.set_file_level(level)
 
@@ -197,7 +227,7 @@ def temporary_log_level(level: Union[str, int], handler_type: str = "console"):
     """
     Temporarily change the log level.
     
-    Usage:
+    Usage:s
         with temporary_log_level("DEBUG"):
             # Debug logging enabled here
             ...
@@ -234,6 +264,67 @@ def temporary_log_level(level: Union[str, int], handler_type: str = "console"):
                     break
 
 
+def log_step(message: str) -> None:
+    """
+    Log a major step with a visual panel.
+    Logs to file as INFO, prints to console as Panel if level <= INFO.
+    """
+    if _logger_instance is None:
+        setup_logging()
+    
+    # Log to file (always happens if file handler is INFO+, which it is by default)
+    file_logger = logging.getLogger("vibe_manga.step")
+    file_logger.info(f"STEP: {message}")
+    
+    # Visual for console
+    # Check effective console level
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, RichHandler):
+            if handler.level <= logging.INFO:
+                _logger_instance.console.print(Panel(message, style="bold magenta"))
+            break
+
+
+def log_substep(message: str) -> None:
+    """
+    Log a sub-step with indentation.
+    """
+    if _logger_instance is None:
+        setup_logging()
+    
+    logger = get_logger("vibe_manga.substep")
+    # We prefix with "  ->" to show hierarchy in text logs
+    # Using [dim] for the arrow to keep it subtle
+    logger.info(f"  [bold cyan]->[/bold cyan] {message}")
+
+
+def log_api_call(url: str, method: str, params: Optional[dict] = None) -> None:
+    """
+    Log an API call with sensitive data masking.
+    Logs at DEBUG level.
+    """
+    if _logger_instance is None:
+        setup_logging()
+        
+    logger = get_logger("vibe_manga.api")
+    
+    # Quick check to avoid processing if not debug
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+
+    safe_params = "None"
+    if params:
+        safe_params = params.copy()
+        keys_to_mask = ['api_key', 'token', 'password', 'secret', 'key']
+        for k in safe_params:
+            if isinstance(k, str) and any(m in k.lower() for m in keys_to_mask):
+                safe_params[k] = "********"
+        safe_params = str(safe_params)
+        
+    logger.debug(f"API CALL: {method} {url} | Params: {safe_params}")
+
+
 __all__ = [
     "VibeMangaError",
     "ConfigError",
@@ -246,4 +337,7 @@ __all__ = [
     "set_log_level",
     "log_and_raise_error",
     "temporary_log_level",
+    "log_step",
+    "log_substep",
+    "log_api_call",
 ]

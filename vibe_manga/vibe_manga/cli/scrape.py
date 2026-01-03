@@ -18,8 +18,9 @@ from ..constants import (
     NYAA_DEFAULT_OUTPUT_FILENAME
 )
 from ..nyaa_scraper import scrape_nyaa, get_latest_timestamp_from_nyaa
+from ..logging import get_logger, log_substep
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 @click.command()
 @click.option("--pages", default=NYAA_DEFAULT_PAGES_TO_SCRAPE, help="Number of pages to scrape.")
@@ -46,17 +47,16 @@ def scrape(pages: int, output: str, user_agent: Optional[str], force: bool, summ
                 
                 if not force:
                     date_str = datetime.datetime.fromtimestamp(latest_known_timestamp).strftime('%Y-%m-%d %H:%M:%S')
-                    console.print(f"[dim]Incremental scrape active. Stopping at timestamp: {latest_known_timestamp} ({date_str})[/dim]")
+                    logger.info(f"Incremental scrape active. Stopping at timestamp: {latest_known_timestamp} ({date_str})")
                     
                     # Quick check against live site
                     latest_live_timestamp = get_latest_timestamp_from_nyaa(user_agent=user_agent)
                     if latest_live_timestamp and latest_live_timestamp <= latest_known_timestamp:
-                        console.print("[green]The Nyaa index has not been updated since the last scrape. Use --force to override.[/green]")
+                        logger.info("The Nyaa index has not been updated since the last scrape. Use --force to override.")
                         perform_scrape = False
                         
         except (json.JSONDecodeError, ValueError) as e:
             logger.warning(f"Could not parse existing file '{output}': {e}. Starting fresh.")
-            console.print(f"[yellow]Warning: Could not parse '{output}'. Starting fresh scrape.[/yellow]")
             # If parse failed, treat as if no existing data
             existing_data = []
 
@@ -83,21 +83,20 @@ def scrape(pages: int, output: str, user_agent: Optional[str], force: bool, summ
                     json.dump(final_list, f, indent=2)
                 
                 logger.info(f"Successfully saved {len(final_list)} results ({len(new_results)} new) to {output}")
-                console.print(f"[green]✓ Saved {len(final_list)} total entries ({len(new_results)} new) to {output}[/green]")
+                log_substep(f"Saved {len(final_list)} total entries ({len(new_results)} new) to {output}")
                 
                 # Update in-memory data for summary
                 existing_data = final_list
                 
             except IOError as e:
                 logger.error(f"Error writing to output file {output}: {e}", exc_info=True)
-                console.print(f"[red]Error: Could not write to file {output}.[/red]")
                 
             logger.info(f"Scrape command completed. Found {len(new_results)} new entries.")
         else:
             if not existing_data and perform_scrape:
-                 console.print("[yellow]Scraping completed with no results.[/yellow]")
+                 logger.warning("Scraping completed with no results.")
             elif perform_scrape:
-                 console.print("[green]No new entries found. Library is up to date.[/green]")
+                 logger.info("No new entries found. Library is up to date.")
 
     # 3. Summarize
     if summarize:

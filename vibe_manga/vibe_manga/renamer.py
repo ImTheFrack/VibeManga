@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict, Set
 
 from .models import Series, Library
-from .analysis import sanitize_filename, calculate_rename_safety
+from .analysis import sanitize_filename, calculate_rename_safety, classify_unit
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +42,10 @@ def add_to_whitelist(series_name: str) -> None:
 @dataclass
 class FileRenameOp:
     original_path: Path
-    new_filename: str
+    new_rel_path: str  # Relative to the NEW series root
     
-    @property
-    def target_path(self) -> Path:
-        return self.original_path.parent / self.new_filename
+    def get_target_path(self, series_root: Path) -> Path:
+        return series_root / self.new_rel_path
 
 @dataclass
 class SeriesRenameOp:
@@ -79,7 +78,7 @@ def generate_rename_op_for_series(
     prefer_english: bool = False, 
     prefer_japanese: bool = False
 ) -> Optional[SeriesRenameOp]:
-    """Generates a rename operation for a single series."""
+    """Generates a rename operation for a single series, including reorganization."""
     # Check Whitelist
     if series.name in whitelist:
         return None
@@ -91,70 +90,105 @@ def generate_rename_op_for_series(
     current_name = series.path.name
     folder_needs_rename = current_name != target_name
     
-    # 2. Determine File Renames
+    # 2. Collect and Analyze all valid comic files
     file_ops = []
+    all_files_data = []
+    all_v_nums = set()
+    all_c_nums = set()
+    all_u_nums = set()
     
-    # Helper to process a directory of files
-    def process_dir(directory: Path, rel_root: Path):
-        if not directory.exists(): return
-        for item in directory.iterdir():
-            if item.is_file():
-                # Ignore metadata and system files
-                lower_name = item.name.lower()
-                if lower_name in ["series.json", "thumbs.db", ".ds_store", "desktop.ini"]:
-                    continue
+    for root, _, files in os.walk(series.path):
+        for f in files:
+            path = Path(root) / f
+            # Ignore metadata and system files
+            lower_name = f.lower()
+            if lower_name in ["series.json", "thumbs.db", ".ds_store", "desktop.ini"]:
+                continue
 
-                # Check extension - STRICT ALLOWLIST
-                ext = item.suffix.lower()
-                if ext not in ['.cbz', '.cbr', '.zip', '.rar']:
-                    # logger.debug(f"Skipping non-comic file: {item.name}")
-                    continue
+            # Check extension - STRICT ALLOWLIST
+            ext = path.suffix.lower()
+            if ext not in ['.cbz', '.cbr', '.zip', '.rar']:
+                continue
 
-                new_ext = ext
-                if ext == '.zip': new_ext = '.cbz'
-                elif ext == '.rar': new_ext = '.cbr'
-                
-                # Check filename prefix
-                fname = item.stem
-                clean_fname = fname
-                
-                # Try to strip the old name prefix
-                prefixes_to_check = [
-                    sanitize_filename(current_name), 
-                    current_name,
-                    sanitize_filename(series.name),
-                    series.name,
-                    target_name,
-                ]
-                # Sort by length descending to match longest prefix first
-                prefixes_to_check.sort(key=len, reverse=True)
-                
-                for prefix in prefixes_to_check:
-                    if fname.lower().startswith(prefix.lower()):
-                        clean_fname = fname[len(prefix):].strip()
-                        break
-                
-                # Reconstruct
-                if clean_fname:
-                    new_fname_stem = f"{target_name} {clean_fname}"
-                else:
-                    new_fname_stem = target_name
-                    
-                import re
-                new_fname_stem = re.sub(r'\s+', ' ', new_fname_stem).strip()
-                new_filename = f"{new_fname_stem}{new_ext}"
-                
-                if item.name != new_filename:
-                    file_ops.append(FileRenameOp(item, new_filename))
+            v, c, u = classify_unit(f)
+            all_files_data.append((path, v, c, u))
+            all_v_nums.update(v)
+            all_c_nums.update(c)
+            all_u_nums.update(u)
     
-    # Scan root
-    process_dir(series.path, series.path)
-    
-    # Scan sub-groups
-    for sg in series.sub_groups:
-        process_dir(sg.path, series.path)
+    if not all_files_data and not folder_needs_rename:
+        return None
 
-    # 3. Return Op if work is needed
+    # 3. Determine Reorganization Requirements
+    has_volumes = bool(all_v_nums)
+    has_chapters = bool(all_c_nums or all_u_nums)
+    use_subfolders = has_volumes and has_chapters
+    
+    vol_folder = ""
+    chap_folder = ""
+    
+    if use_subfolders:
+        min_v = min(all_v_nums)
+        max_v = max(all_v_nums)
+        def fmt_num(n): return str(int(n)).zfill(2) if n.is_integer() else str(n).zfill(2)
+        
+        vol_folder = f"{target_name} v{fmt_num(min_v)}-v{fmt_num(max_v)}"
+        if min_v == max_v: vol_folder = f"{target_name} v{fmt_num(min_v)}"
+        
+        chap_start = int(max_v) + 1
+        chap_folder = f"{target_name} v{str(chap_start).zfill(2)}+"
+
+    # 4. Generate File Ops
+    import re
+    prefixes_to_check = [
+        sanitize_filename(current_name), 
+        current_name,
+        sanitize_filename(series.name),
+        series.name,
+        target_name,
+    ]
+    prefixes_to_check.sort(key=len, reverse=True)
+
+    for path, v, c, u in all_files_data:
+        ext = path.suffix.lower()
+        new_ext = ext
+        if ext == '.zip': new_ext = '.cbz'
+        elif ext == '.rar': new_ext = '.cbr'
+        
+        fname = path.stem
+        clean_fname = fname
+        
+        for prefix in prefixes_to_check:
+            if fname.lower().startswith(prefix.lower()):
+                clean_fname = fname[len(prefix):].strip()
+                break
+        
+        # Reconstruct
+        if clean_fname:
+            new_fname_stem = f"{target_name} {clean_fname}"
+        else:
+            new_fname_stem = target_name
+            
+        new_fname_stem = re.sub(r'\s+', ' ', new_fname_stem).strip()
+        new_filename = f"{new_fname_stem}{new_ext}"
+        
+        # Determine target subfolder
+        target_sub = ""
+        if use_subfolders:
+            if v: target_sub = vol_folder
+            elif c or u: target_sub = chap_folder
+        
+        new_rel_path = Path(target_sub) / new_filename
+        
+        # Check if changed (path or name)
+        try:
+            current_rel = path.relative_to(series.path)
+            if str(current_rel) != str(new_rel_path):
+                file_ops.append(FileRenameOp(path, str(new_rel_path)))
+        except ValueError:
+            continue
+
+    # 5. Return Op if work is needed
     if folder_needs_rename or file_ops:
         safety = calculate_rename_safety(current_name, target_name)
         
@@ -249,7 +283,7 @@ def execute_rename_op(op: SeriesRenameOp) -> List[str]:
                 continue
             
             current_file_path = final_series_path / rel_path
-            target_file_path = current_file_path.parent / f_op.new_filename
+            target_file_path = f_op.get_target_path(final_series_path)
             
             if str(current_file_path) == str(target_file_path):
                 continue
@@ -257,6 +291,10 @@ def execute_rename_op(op: SeriesRenameOp) -> List[str]:
             if not current_file_path.exists():
                 logger.warning(f"Source file not found at expected path, skipping: {current_file_path}")
                 continue
+
+            # Ensure parent directory exists for renames that move files into subfolders
+            if not target_file_path.parent.exists():
+                target_file_path.parent.mkdir(parents=True, exist_ok=True)
 
             if target_file_path.exists():
                 is_same_file = False

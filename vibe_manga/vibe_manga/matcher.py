@@ -19,6 +19,7 @@ from rich.panel import Panel
 from rich.columns import Columns
 from rich.align import Align
 from . import constants as c
+from .logging import get_logger, log_step, log_substep
 from .scanner import scan_library
 from .models import Series, Library
 from .indexer import LibraryIndex
@@ -36,7 +37,7 @@ from .analysis import (
 )
 from .cache import get_cached_library, save_library_cache, load_resolution_cache, save_resolution_cache
 
-logger = logging.getLogger(__name__) 
+logger = get_logger(__name__) 
 console = Console()
 
 # --- CONSTANTS & PATTERNS ---
@@ -867,14 +868,14 @@ def _resolve_remote_identities(data: List[Dict[str, Any]], library_index: Librar
         save_resolution_cache(res_cache)
 
     if resolved_count > 0:
-        msg = f"[green]Remote Resolution: Matched {resolved_groups} groups ({resolved_count} entries) to library.[/green]"
+        msg = f"Remote Resolution: Matched {resolved_groups} groups ({resolved_count} entries) to library."
         if cache_hits > 0:
-            msg += f" [dim](Cached: {cache_hits})[/dim]"
-        console.print(msg)
+            msg += f" (Cached: {cache_hits})"
+        log_substep(msg)
     elif cache_hits > 0:
-        console.print(f"[dim]Remote Resolution: No new matches (Cached hits: {cache_hits})[/dim]")
+        logger.info(f"Remote Resolution: No new matches (Cached hits: {cache_hits})")
     else:
-        console.print("[dim]Remote Resolution: No new matches found.[/dim]")
+        logger.info("Remote Resolution: No new matches found.")
             
     return resolved_count
 
@@ -882,14 +883,14 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
     start_time = time.time()
     p = Path(input_file)
     if not p.exists():
-        console.print(f"[red]Input file {input_file} not found.[/red]")
+        logger.error(f"Input file {input_file} not found.")
         return
 
     try:
         with open(p, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except Exception as e:
-        console.print(f"[red]Error reading {input_file}: {e}[/red]")
+        logger.error(f"Error reading {input_file}: {e}")
         return
 
     # NEW: Build Library Index for Matching
@@ -924,15 +925,15 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
                  filtered_series = [s for s in all_series if q_lower in s.name.lower()]
                  
                  if not filtered_series:
-                     console.print(f"[red]No series found in library matching '{query}'.[/red]")
+                     logger.warning(f"No series found in library matching '{query}'.")
                      return
                  
                  if len(filtered_series) > 1:
                      names = ", ".join([s.name for s in filtered_series[:5]])
                      if len(filtered_series) > 5: names += "..."
-                     console.print(f"[yellow]Multiple matches for '{query}': {names}. Matching against all {len(filtered_series)}.[/yellow]")
+                     logger.warning(f"Multiple matches for '{query}': {names}. Matching against all {len(filtered_series)}.")
                  else:
-                     console.print(f"[green]Targeting series: {filtered_series[0].name}[/green]")
+                     logger.info(f"Targeting series: {filtered_series[0].name}")
                  
                  # Create a temporary library subset for the index
                  # This is a bit hacky but effective to limit scope
@@ -952,7 +953,7 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
                  total_library_series = library.total_series
 
         except Exception as e:
-            console.print(f"[yellow]Warning: Could not process library for matching: {e}[/yellow]")
+            logger.warning(f"Could not process library for matching: {e}")
 
     # PERSISTENCE: Load existing output file to preserve matches
     existing_map = {}
@@ -964,7 +965,7 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
                     if "magnet_link" in item:
                         existing_map[item["magnet_link"]] = item
         except Exception as e:
-            console.print(f"[yellow]Warning: Could not load existing match data from {output_file}: {e}[/yellow]")
+            logger.warning(f"Could not load existing match data from {output_file}: {e}")
 
     processed_data = []
 
@@ -1093,19 +1094,20 @@ def process_match(input_file: str, output_file: str, show_table: bool, show_all:
     # Propagate matches to peers in the same group
     propagated = _propagate_matches(processed_data)
     if propagated > 0:
-        console.print(f"[green]Propagated matches to {propagated} related entries.[/green]")
+        log_substep(f"Propagated matches to {propagated} related entries.")
 
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
             json.dump(processed_data, f, indent=2)
-        console.print(f"[green]Successfully processed {len(processed_data)} entries. Saved to {output_file}[/green]")
+        logger.info(f"Successfully processed {len(processed_data)} entries. Saved to {output_file}")
+        log_substep(f"Saved match results to {output_file}")
     except Exception as e:
-        console.print(f"[red]Error writing to {output_file}: {e}[/red]")
+        logger.error(f"Error writing to {output_file}: {e}")
 
     # Save the updated Library state
     if library:
         save_library_cache(library)
-        console.print(f"[green]Integrated matches into library state.[/green]")
+        log_substep("Integrated matches into library state.")
 
     # Prepare Data for Display (Always Consolidate)
     table_data = consolidate_entries(processed_data)

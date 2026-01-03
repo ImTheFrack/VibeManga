@@ -25,8 +25,9 @@ from ..models import Series
 from ..metadata import get_or_create_metadata
 from ..ai_api import tracker
 from ..constants import PROGRESS_REFRESH_RATE
+from ..logging import get_logger, log_substep
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 @click.command()
 @click.argument("query", required=False)
@@ -76,6 +77,7 @@ def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, proces
         return
 
     console.print(f"[cyan]Found {len(targets)} series to process...[/cyan]")
+    logger.info(f"Found {len(targets)} series to process")
     
     table = Table(title="Updated Metadata", box=box.ROUNDED)
     table.add_column("Series", style="white bold")
@@ -127,6 +129,8 @@ def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, proces
                     trust_jikan=trust_jikan,
                     status_callback=local_callback
                 )
+                
+                log_substep(f"Updated {series.name} from {source}")
                 
                 # Update status with source (Thread-safe lock for Table)
                 color = "green" if "Trusted" in source or "Local" in source else "cyan" if "Jikan" in source else "magenta"

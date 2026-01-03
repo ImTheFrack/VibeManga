@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
 from rich import box
@@ -31,6 +30,8 @@ from .constants import (
     PULL_TEMPDIR,
     FUZZY_MATCH_THRESHOLD
 )
+from .indexer import LibraryIndex
+from .logging import get_logger, log_substep, temporary_log_level, console
 from .cache import load_library_state, save_library_cache
 from .matcher import consolidate_entries, parse_entry
 from .scanner import scan_series
@@ -46,10 +47,58 @@ from .analysis import (
     sanitize_filename
 )
 
-logger = logging.getLogger(__name__)
-console = Console()
+logger = get_logger(__name__)
 
-def get_matched_or_parsed_name(torrent_name: str, library: Optional[Any] = None, match_data: Optional[List[Dict]] = None, series_map: Optional[Dict[str, Any]] = None) -> str:
+def generate_search_candidates(text: str) -> List[str]:
+    """
+    Generates potential series title candidates from a raw filename/title.
+    Replicates the logic from the old find_series_match to ensure robust matching.
+    """
+    raw_pieces = [text]
+    
+    # Split original text by common separators BEFORE stripping
+    if "|" in text:
+        raw_pieces.extend([p.strip() for p in text.split("|")])
+    if "｜" in text:
+        raw_pieces.extend([p.strip() for p in text.split("｜")])
+    if " / " in text:
+        raw_pieces.extend([p.strip() for p in text.split("/")])
+    if " - " in text:
+        raw_pieces.extend([p.strip() for p in text.split(" - ")])
+    
+    candidates = []
+    
+    # Extract bracketed content (often contains the title in some groups)
+    # [Oshi no Ko] -> Oshi no Ko
+    bracketed = re.findall(r'\[(.*?)\]|\((.*?)\)', text)
+    for b in bracketed:
+        content = b[0] or b[1]
+        if content and len(content) > 3: # Ignore short tags
+            candidates.append(content.strip())
+
+    # Process all pieces through strip_volume_info
+    for piece in raw_pieces:
+        clean = strip_volume_info(piece)
+        if clean:
+            candidates.append(clean)
+            
+            # Sub-split the cleaned version too, just in case
+            if ":" in clean:
+                candidates.extend([p.strip() for p in clean.split(":")])
+            if "!" in clean:
+                candidates.extend([p.strip() for p in clean.split("!")])
+
+    # 'The' handling
+    extra = []
+    for c in candidates:
+        if c.lower().startswith("the "):
+            extra.append(c[4:].strip())
+    candidates.extend(extra)
+            
+    # Dedup and clean
+    return sorted(list(set(c for c in candidates if c.strip())), key=len, reverse=True)
+
+def get_matched_or_parsed_name(torrent_name: str, library_index: Optional[LibraryIndex] = None, match_data: Optional[List[Dict]] = None, series_map: Optional[Dict[str, Any]] = None) -> str:
     """
     Tries to find a library match for a torrent name, 
     falling back to a parsed name if no match is found.
@@ -61,36 +110,24 @@ def get_matched_or_parsed_name(torrent_name: str, library: Optional[Any] = None,
                 mid = entry.get("matched_id")
                 if mid and mid in series_map:
                     return f"[green]{series_map[mid].name}[/green]"
-                # Even if not in map, maybe we have a matched_name
-                #mname = entry.get("matched_name")
-                #if mname:
-                #    return f"[green]{mname}[/green]"
-                # BUGFIX: Only use matched_name if we have a verified library match
-                # Otherwise, re-parse to get the correct name
-                
                 break
 
-    # 2. Try Library Fuzzy Match
-    if library:
-        local_match = find_series_match(torrent_name, library)
-        if local_match:
-            return f"[green]{local_match.name}[/green]"
+    # 2. Try Library Index Match (Exact/Synonym with Candidates)
+    if library_index:
+        candidates = generate_search_candidates(torrent_name)
+        for cand in candidates:
+            matches = library_index.search(cand)
+            if matches:
+                return f"[green]{matches[0].name}[/green]"
     
     # 3. Fallback to Parsing
     parsed = parse_entry({"name": torrent_name})
     parsed_names = parsed.get("parsed_name", [])
     if parsed_names and not any(n.startswith("SKIPPED:") for n in parsed_names):
-        # Filter out substrings to avoid redundancy (e.g. if we have "A", "B", and "A | B", just keep "A | B")
-        # This handles the case where parse_entry returns both the parts and the combined string.
         unique_names = []
-        # Sort by length descending so we keep the "superstring" candidates first
         sorted_candidates = sorted(list(set(parsed_names)), key=len, reverse=True)
         
         for candidate in sorted_candidates:
-            # If this candidate is not a substring of any already selected name (which are longer/equal)
-            # Note: We need to be careful. "Ten" is in "Ten Ten". 
-            # But for "A | B", A is definitely in it.
-            # Using semantic normalization for comparison might be safer but raw check works for literal splits.
             is_substring = False
             for selected in unique_names:
                 if candidate in selected:
@@ -100,269 +137,9 @@ def get_matched_or_parsed_name(torrent_name: str, library: Optional[Any] = None,
             if not is_substring:
                 unique_names.append(candidate)
                 
-        # Reverse back to restore some logical order (though order was lost by set/sort)
-        # Actually, let's just use the filtered list.
         return " | ".join(unique_names)
     
     return f"[dim]{torrent_name}[/dim]"
-
-def find_series_match(torrent_name: str, library: Optional[Any] = None) -> Optional[Any]:
-    """Finds the matched Series object in the library for a given torrent name."""
-    if not library:
-        return None
-    
-        # Strip volume/chapter info before normalizing to improve match rate for short titles
-    clean_name = strip_volume_info(torrent_name)
-
-    # --- PASS 1: Full Name Match ---
-    # Prioritize matching the full string before splitting
-    norm_full = semantic_normalize(clean_name)
-    best_match = None
-    best_ratio = 0.0
-
-    if norm_full:
-
-        for cat in library.categories:
-
-            for sub in cat.sub_categories:
-
-                for s in sub.series:
-
-                    # CHECK ALL IDENTITIES (Folder Name + Metadata Synonyms)
-
-                    for identity in s.identities:
-
-                        norm_s_name = semantic_normalize(identity)
-
-                        if not norm_s_name: continue
-
-
-
-                        if norm_s_name == norm_full:
-
-                            return s
-
-                        
-
-                        ratio = difflib.SequenceMatcher(None, norm_full, norm_s_name).ratio() * 100
-
-                        if ratio > best_ratio:
-
-                            if ratio >= FUZZY_MATCH_THRESHOLD:
-
-                                    # Same number check logic
-
-                                    nums_a = [int(n) for n in re.findall(r'\d+', norm_full)]
-
-                                    nums_b = [int(n) for n in re.findall(r'\d+', norm_s_name)]
-
-                                    if nums_a != nums_b: continue
-
-                            
-
-                            best_ratio = ratio
-
-                            if ratio >= FUZZY_MATCH_THRESHOLD:
-
-                                best_match = s
-
-        
-
-        # If we found a high-confidence match with the full name, return it.
-
-        if best_match:
-
-            return best_match
-    
-    
-    
-        # --- PASS 2: Split/Subtitle Match ---
-    
-        # Only if full match failed, try breaking it down
-    
-        candidates = []
-    
-    
-    
-        # Check for multi-title separators (|, ｜, /)
-    
-        if "|" in clean_name:
-    
-            candidates.extend([p.strip() for p in clean_name.split("|")])
-    
-        if "｜" in clean_name:
-    
-            candidates.extend([p.strip() for p in clean_name.split("｜")])
-    
-        if "/" in clean_name:
-    
-            if " / " in clean_name:
-    
-                 candidates.extend([p.strip() for p in clean_name.split("/")])
-    
-    
-    
-        # NEW: Split by other common delimiters for subtitles/taglines
-    
-        # 1. Exclamation Mark (often ends the main title)
-    
-        if "!" in clean_name:
-    
-            candidates.extend([p.strip() for p in clean_name.split("!")])
-    
-    
-    
-        # 2. Colon (often separates Title: Subtitle)
-    
-        if ":" in clean_name:
-    
-            candidates.extend([p.strip() for p in clean_name.split(":")])
-    
-    
-    
-        # 3. Hyphen surrounded by spaces (Title - Subtitle)
-    
-        if " - " in clean_name:
-    
-            candidates.extend([p.strip() for p in clean_name.split(" - ")])
-    
-    
-    
-        # 4. Handle leading "The " if it wasn't stripped by semantic_normalize (for candidates generation)
-    
-        if clean_name.lower().startswith("the "):
-    
-            candidates.append(clean_name[4:].strip())
-    
-    
-    
-        # Normalize all candidates
-    
-        norm_candidates = [semantic_normalize(c) for c in candidates if c.strip()]
-    
-        
-    
-        # Reset best match tracking for this pass
-    
-        best_match = None
-    
-        best_ratio = 0.0
-    
-    
-    
-        for cat in library.categories:
-
-
-
-            for sub in cat.sub_categories:
-
-
-
-                for s in sub.series:
-
-
-
-                    # CHECK ALL IDENTITIES (Folder Name + Metadata Synonyms)
-
-
-
-                    for identity in s.identities:
-
-
-
-                        norm_s_name = semantic_normalize(identity)
-
-
-
-                        if not norm_s_name: continue
-
-
-
-                        
-
-
-
-                        for norm_t_name in norm_candidates:
-
-
-
-                            if not norm_t_name: continue
-
-
-
-    
-
-
-
-                            # 1. Exact Match (Normalized)
-
-
-
-                            if norm_s_name == norm_t_name:
-
-
-
-                                return s
-
-
-
-                            
-
-
-
-                            # 2. Fuzzy Match
-
-
-
-                            ratio = difflib.SequenceMatcher(None, norm_t_name, norm_s_name).ratio() * 100
-
-
-
-                            if ratio > best_ratio:
-
-
-
-                                # Enforce number consistency for high-confidence fuzzy matches
-
-
-
-                                if ratio >= FUZZY_MATCH_THRESHOLD:
-
-
-
-                                    nums_a = [int(n) for n in re.findall(r'\d+', norm_t_name)]
-
-
-
-                                    nums_b = [int(n) for n in re.findall(r'\d+', norm_s_name)]
-
-
-
-                                    if nums_a != nums_b:
-
-
-
-                                        continue
-
-
-
-    
-
-
-
-                                best_ratio = ratio
-
-
-
-                                if ratio >= FUZZY_MATCH_THRESHOLD:
-
-
-
-                                    best_match = s
-    
-    
-    
-        return best_match
 
 def vibe_format_range(numbers: List[float], prefix: str = "", pad: int = 0) -> str:
     """Formats a list of numbers into a consistent string (e.g., v01, 001.5)."""
@@ -924,36 +701,43 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
         input_file: Path to the JSON file with match results to update.
     """
     qbit = QBitAPI()
-    console.print(Rule("[bold magenta]Pulling Completed Torrents[/bold magenta]"))
+    
+    logger.info("Pulling Completed Torrents")
     if simulate:
-        console.print("[bold yellow]SIMULATION MODE ACTIVE - No changes will be made.[/bold yellow]")
+        logger.warning("SIMULATION MODE ACTIVE - No changes will be made.")
     
     if not QBIT_DOWNLOAD_ROOT:
-        console.print("[yellow]Warning: QBIT_DOWNLOAD_ROOT is not set in .env.[/yellow]")
-        console.print("[dim]Please set it to your local download path. Use forward slashes (e.g., Z:/Downloads) to avoid escaping issues.[/dim]\n")
+        logger.warning("QBIT_DOWNLOAD_ROOT is not set in .env. Please set it to your local download path.")
 
-    # Load match results if input_file is provided
+    # Load match results
     match_data = []
     if input_file and os.path.exists(input_file):
         try:
             with open(input_file, 'r', encoding='utf-8') as f:
                 match_data = json.load(f)
         except Exception as e:
-            console.print(f"[red]Warning: Could not load match results from {input_file}: {e}[/red]")
+            logger.error(f"Could not load match results from {input_file}: {e}")
 
+    # Use status for connecting as it's a blocking op
     with console.status("[bold blue]Connecting to qBittorrent..."):
         torrents = qbit.get_torrents_info(tag=QBIT_DEFAULT_TAG)
     
     if not torrents:
-        console.print("[yellow]No VibeManga torrents found in qBittorrent.[/yellow]")
+        logger.warning("No VibeManga torrents found in qBittorrent.")
         return
 
-    # Load library for matching reporting
+    # Load library
     library = None
+    library_index = None
     series_map = {}
     if root_path:
         library = load_library_state(Path(root_path))
         if library:
+            # Build Index for fast lookups
+            log_substep("Building Library Index for fast matching...")
+            library_index = LibraryIndex()
+            library_index.build(library)
+            
             for cat in library.categories:
                 for sub in cat.sub_categories:
                     for s in sub.series:
@@ -964,22 +748,19 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                             sid = s.name
                         series_map[sid] = s
 
-    # Pre-calculate display names and sort keys
+    # Pre-calculate display names
+    log_substep(f"Analyzing {len(torrents)} torrents...")
     for t in torrents:
-        disp = get_matched_or_parsed_name(t["name"], library, match_data=match_data, series_map=series_map)
+        disp = get_matched_or_parsed_name(t["name"], library_index, match_data=match_data, series_map=series_map)
         t["_display_name"] = disp
-        # Create a plain-text version for sorting (remove Rich tags)
         t["_sort_name"] = re.sub(r"\[.*?\]", "", disp).lower()
 
-    # Sort: Non-completed first, then by matched name
+    # Sort
     sorted_torrents = sorted(torrents, key=lambda x: (x.get("progress") >= 1.0, x.get("_sort_name")))
-    
     completed = [t for t in sorted_torrents if t.get("progress") == 1.0]
     
-    # Calculate a sensible max width for the name column based on console width
-    # Subtracting ~45 for Size, Progress, Status columns and borders/padding
+    # Table is visual, keep console.print
     name_col_max = max(40, console.width - 45)
-
     table = Table(title=f"VibeManga Torrents ({len(torrents)})", box=box.ROUNDED)
     table.add_column("Matched/Parsed Name", style="white", no_wrap=True, overflow="ellipsis", max_width=name_col_max)
     table.add_column("Size", justify="right", style="green")
@@ -998,7 +779,6 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
             prog_str = f"[bold green]{prog_str}[/bold green]"
 
         display_name = t["_display_name"]
-        
         if is_done:
             completed_count += 1
             display_name = f"{completed_count}. {display_name}"
@@ -1008,8 +788,11 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
     console.print(table)
 
     if not completed:
-        console.print(f"[yellow]Found {len(torrents)} VibeManga torrents, but none are completed (100%).[/yellow]")
+        logger.info(f"Found {len(torrents)} VibeManga torrents, but none are completed (100%).")
         return
+
+    if not simulate and not pause:
+        pass
 
     if not click.confirm(f"Proceed with post-processing {len(completed)} completed torrents?"):
         console.print("[yellow]Operation cancelled.[/yellow]")
@@ -1017,77 +800,64 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
 
     for i, t in enumerate(completed):
         display_name = t["_display_name"]
-        console.print(f"\n[bold cyan]Processing [{i+1}/{len(completed)}]: {display_name}[/bold cyan]")
-        console.print(f"[dim]Torrent: {t['name']}[/dim]")
+        logger.info(f"Processing [{i+1}/{len(completed)}]: {t['_sort_name']}")
         
         # Step 1: Stop Torrent
-        action_msg = "[1/8] Stopping torrent in qBittorrent..."
         if simulate:
-            console.print(f"[yellow]SIMULATE: {action_msg}[/yellow]")
+            logger.info("[SIMULATE] Stopping torrent...")
         else:
-            with console.status(f"[bold blue]{action_msg}"):
-                if qbit.pause_torrents([t["hash"]]):
-                    console.print("[green][1/8] ✓ Torrent stopped.[/green]")
-                else:
-                    console.print("[red][1/8] ✗ Failed to stop torrent.[/red]")
-                    if not click.confirm("Continue anyway?"):
-                         break
+            if qbit.pause_torrents([t["hash"]]):
+                log_substep("Torrent stopped")
+            else:
+                logger.error("Failed to stop torrent")
+                if not click.confirm("Continue anyway?"): break
 
         # Step 2: Identify Location
-        raw_path = t.get("content_path")
-        if not raw_path:
-            save_path = t.get("save_path", "")
-            raw_path = os.path.join(save_path, t["name"])
-        
+        raw_path = t.get("content_path") or os.path.join(t.get("save_path", ""), t["name"])
         content_path = raw_path
-        # Mapping logic: Replace internal qBit prefix with host root
         if QBIT_DOWNLOAD_ROOT:
-            # Strip drive letters and leading slashes to ensure a clean join.                                                                                                                                                                                                                                             │
-            # Example: /torrents/VibeManga/... -> torrents/VibeManga/...
             clean_path = raw_path.lstrip("/").lstrip("\\")
             if ":" in clean_path:
                 clean_path = clean_path.split(":", 1)[1].lstrip("/").lstrip("\\")
             content_path = os.path.join(QBIT_DOWNLOAD_ROOT, clean_path)
             
-        action_msg = f"[2/8] Locating files: {content_path}"
-        if QBIT_DOWNLOAD_ROOT:
-            console.print(f"[dim][2/8] Mapping: {raw_path} -> {content_path}[/dim]")
-
         if simulate:
-            console.print(f"[yellow][2/8] SIMULATE: {action_msg}[/yellow]")
+            logger.info(f"[SIMULATE] Locating files at {content_path}")
         else:
             if content_path and os.path.exists(content_path):
-                console.print(f"[green][2/8] ✓ Found files at: {content_path}[/green]")
+                log_substep(f"Found files at: {content_path}")
             else:
-                console.print(f"[red][2/8] ✗ Could not find files at: {content_path}[/red]")
-                if not click.confirm("Continue anyway?"):
-                    break
-                    
-        # --- NEW FLOW START ---
-        
-        # Step 3: Calculate Names (In-Memory Normalization)
-        # Extract the plain series name from the matched/parsed name.
-        series_name = re.sub(r"\[.*?\]", "", display_name).strip()
-        series_name = re.sub(r"^\d+\.\s+", "", series_name)
+                logger.error(f"Could not find files at: {content_path}")
+                if not click.confirm("Continue anyway?"): break
+
+        # Step 3: Calculate Names
+        # Don't strip brackets here anymore, strip_volume_info and semantic_normalize handle it better,
+        # and it might be the actual title (e.g. [Oshi no Ko]).
+        series_name = re.sub(r"^\d+\.\s+", "", display_name).strip()
         series_name = sanitize_filename(series_name)
         
-        action_msg = f"[3/8] Analyzing content and generating plan for: {series_name}"
         if simulate:
-            console.print(f"[yellow][3/8] SIMULATE: {action_msg}[/yellow]")
+            logger.info(f"[SIMULATE] Analyzing content for: {series_name}")
         
         transfer_plan = []
         if os.path.exists(content_path):
              transfer_plan = generate_transfer_plan(Path(content_path), series_name)
         
         if not transfer_plan:
-            console.print(f"[red][3/8] ✗ No valid files found in {content_path}[/red]")
+            logger.error(f"No valid files found in {content_path}")
             continue
 
-        console.print(f"[green][3/8] ✓ Identified {len(transfer_plan)} potential files.[/green]")
+        log_substep(f"Identified {len(transfer_plan)} potential files")
+        for item in transfer_plan:
+             logger.debug(f"[dim]Found File: {item['src'].name} -> {item['dst_name']} (v:{item['v']} c:{item['c']} u:{item['u']})[/dim]")
+        
+        # Log a summary of what was found
+        total_v = len(set(n for item in transfer_plan for n in item['v']))
+        total_c = len(set(n for item in transfer_plan for n in item['c'] + item['u']))
+        logger.info(f"Torrent contains: [bold cyan]{total_v} volumes[/bold cyan] and [bold cyan]{total_c} chapters/units[/bold cyan]")
 
         # Step 4: Analyze (Filter Plan)
         local_series = None
-        # Match to library (Prioritize match_data over fuzzy match)
         if match_data and series_map:
             for entry in match_data:
                 if entry.get("name") == t["name"]:
@@ -1096,40 +866,62 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                         local_series = series_map[mid]
                     break
         
-        if not local_series:
-            # Try matching using the sanitized series name (cleaner than torrent name)
-            # Handle potential multi-part names (e.g. "Title A ｜ Title B")
-            candidates = [series_name]
-            if "｜" in series_name:
-                candidates.extend([p.strip() for p in series_name.split("｜")])
+        if not local_series and library_index:
+            # Robust candidate generation from multiple sources
+            # 1. From our calculated series_name
+            candidates = generate_search_candidates(series_name)
+            
+            # 2. From the raw torrent name (if different)
+            if t['name'] != series_name:
+                raw_candidates = generate_search_candidates(t['name'])
+                for rc in raw_candidates:
+                    if rc not in candidates: candidates.append(rc)
+            
+            # 3. From the display name (if different)
+            if display_name != series_name and display_name != t['name']:
+                disp_candidates = generate_search_candidates(display_name)
+                for dc in disp_candidates:
+                    if dc not in candidates: candidates.append(dc)
             
             for cand in candidates:
-                local_series = find_series_match(cand, library)
-                if local_series:
+                matches = library_index.search(cand)
+                if matches: 
+                    local_series = matches[0]
                     break
             
-            # Fallback to raw torrent name if still not found
-            if not local_series:
-                local_series = find_series_match(t['name'], library)
+            # If no exact match, try fuzzy search on the best candidate (usually the first one)
+            if not local_series and candidates:
+                # Use project-wide threshold (usually 0.9 or 90)
+                # LibraryIndex.fuzzy_search expects float 0.0-1.0
+                thresh = FUZZY_MATCH_THRESHOLD / 100.0 if FUZZY_MATCH_THRESHOLD > 1.0 else FUZZY_MATCH_THRESHOLD
+                fuzzy_matches = library_index.fuzzy_search(candidates[0], threshold=thresh)
+                if fuzzy_matches:
+                    local_series = fuzzy_matches[0]
 
         action_msg = "[4/8] Filtering content against library..."
-        pulled_vols, pulled_chaps, pulled_units = [], [], []
-        new_v, new_c = [], []
-        
-        # Collect detected numbers from plan
+        pulled_vols = []
+        pulled_chaps = []
+        pulled_units = []
         for item in transfer_plan:
             pulled_vols.extend(item['v'])
             pulled_chaps.extend(item['c'])
             pulled_units.extend(item['u'])
             
-        pulled_v_str = format_ranges(pulled_vols)
-        pulled_c_str = format_ranges(pulled_chaps)
-        pulled_u_str = format_ranges(pulled_units)
-        
-        console.print(f"[bold green][4/8] Scraped Content:[/bold green] Vols: {pulled_v_str} | Chaps: {pulled_c_str} | Units: {pulled_u_str}")
+        log_substep(f"Scraped Content: Vols: {format_ranges(pulled_vols)} | Chaps: {format_ranges(pulled_chaps)}")
 
         if local_series:
-            console.print(f"[green][4/8] Matched to Library: {local_series.name}[/green]")
+            log_substep(f"Matched to Library: {local_series.name}")
+            
+            # Fix filenames if series_name was generic/incorrect
+            sanitized_local_name = sanitize_filename(local_series.name)
+            if sanitized_local_name != series_name:
+                for item in transfer_plan:
+                    if item['dst_name'].startswith(series_name):
+                         item['dst_name'] = sanitized_local_name + item['dst_name'][len(series_name):]
+                
+                # Update series_name for subsequent steps (folder naming)
+                series_name = sanitized_local_name
+
             all_local_vols = local_series.volumes + [v for sg in local_series.sub_groups for v in sg.volumes]
             l_v_nums, l_c_nums = [], []
             for v in all_local_vols:
@@ -1137,87 +929,66 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                 l_v_nums.extend(v_n); l_c_nums.extend(c_n + u_n)
             
             l_v_set, l_c_set = set(l_v_nums), set(l_c_nums)
-            
-            # Identify what is truly new
             new_v = sorted(list(set(n for n in pulled_vols if n not in l_v_set)))
             new_c = sorted(list(set(n for n in pulled_chaps if n not in l_c_set)))
             
             if new_v or new_c:
-                console.print(f"[bold yellow][4/8] Fills Gaps:[/bold yellow] Vols: {format_ranges(new_v)} | Chaps: {format_ranges(new_c)}")
+                msg = "Fills Gaps:"
+                if new_v: msg += f" [bold green]Vols: {format_ranges(new_v)}[/bold green]"
+                if new_c: msg += f" [bold green]Chaps: {format_ranges(new_c)}[/bold green]"
+                logger.info(msg)
+                log_substep(f"Fills Gaps: Vols: {format_ranges(new_v)} | Chaps: {format_ranges(new_c)}")
             else:
-                console.print("[yellow][4/8] All pulled content already exists in library (Potential Upgrade/Duplicate).[/yellow]")
+                logger.info("All pulled content already exists in library (Potential Upgrade/Duplicate).")
                 
-            # Update Plan: Mark duplicates as skipped
             skipped_count = 0
             for item in transfer_plan:
-                # Logic: If item provides NO new volumes AND NO new chapters/units -> Check size for upgrade
-                # Actually, simplistic check: if all its numbers are in local set, it's a potential duplicate.
-                
                 is_redundant = True
                 if item['v']:
                     if any(n not in l_v_set for n in item['v']): is_redundant = False
                 elif item['c']:
                     if any(n not in l_c_set for n in item['c']): is_redundant = False
-                elif item['u']: # Units treated as chapters usually
+                elif item['u']:
                      if any(n not in l_c_set for n in item['u']): is_redundant = False
                 else:
-                    # No numbers? Keep it to be safe (might be extra art)
                     is_redundant = False
                     
                 if is_redundant:
-                    # It covers known range. Check if we want to skip it.
-                    # For now, let's skip strict duplicates (same size? or just redundant content?)
-                    # The user said "Step 3 could just copy the files it needs".
-                    # Let's assume redundant = skip unless size is significantly larger?
-                    # The original code just imported "files_to_import" if "fills_gap" was true.
-                    # "fills_gap" logic was: is_new OR not (l_v_set or l_c_set) OR (any n not in set).
-                    
                     item['skip'] = True
                     skipped_count += 1
                     
             if skipped_count > 0:
-                console.print(f"[dim][4/8] Marking {skipped_count} redundant files to skip copying.[/dim]")
-                
+                log_substep(f"Marking {skipped_count} redundant files to skip copying.")
         else:
-            console.print("[bold cyan][4/8] NEW SERIES: No match found in library. All files will be copied.[/bold cyan]")
-            new_v = sorted(list(set(pulled_vols)))
-            new_c = sorted(list(set(pulled_chaps)))
+            log_substep("NEW SERIES: No match found in library. All files will be copied.")
 
         # Step 5: Stage (Copy)
         files_to_stage = [item for item in transfer_plan if not item['skip']]
         
         if not files_to_stage:
-             console.print("[yellow][5/8] No files need to be copied (All redundant).[/yellow]")
-             # We might still proceed to cleanup if it was all duplicates?
-             # If user wants to just clear the torrent.
+             logger.info("No files need to be copied (All redundant).")
         
         if not PULL_TEMPDIR:
-             console.print("[red][5/8] ✗ PULL_TEMPDIR is not set. Cannot stage files.[/red]")
+             logger.error("PULL_TEMPDIR is not set. Cannot stage files.")
         else:
             dest_dir = Path(PULL_TEMPDIR)
-            
-            # Clear Temp Dir
             if not simulate:
                 if dest_dir.exists() and any(dest_dir.iterdir()):
-                    console.print(f"[bold red][5/8] Warning: Temp directory is not empty: {dest_dir}[/bold red]")
-                    if Confirm.ask("[5/8] Clear temp directory? [bold red]This is destructive![/bold red]"):
-                        with console.status("[bold red][5/8] Clearing temp directory..."):
-                            for item in dest_dir.iterdir():
-                                try:
-                                    if item.is_dir():
-                                        shutil.rmtree(item)
-                                    else:
-                                        item.unlink()
-                                except Exception as e:
-                                    console.print(f"[red][5/8] Error clearing {item}: {e}[/red]")
-                        console.print("[green][5/8] ✓ Temp directory cleared.[/green]")
+                    logger.warning(f"Temp directory is not empty: {dest_dir}")
+                    if Confirm.ask("Clear temp directory? This is destructive!"):
+                        for item in dest_dir.iterdir():
+                            try:
+                                if item.is_dir(): shutil.rmtree(item)
+                                else: item.unlink()
+                            except Exception as e:
+                                logger.error(f"Error clearing {item}: {e}")
+                        log_substep("Temp directory cleared")
                     else:
-                        console.print("[yellow][5/8] Pull aborted by user.[/yellow]")
+                        logger.warning("Pull aborted by user.")
                         break
             
-            action_msg = f"[5/8] Staging {len(files_to_stage)} files to: {dest_dir}"
             if simulate:
-                console.print(f"[yellow][5/8] SIMULATE: {action_msg}[/yellow]")
+                logger.info(f"[SIMULATE] Staging {len(files_to_stage)} files to: {dest_dir}")
             else:
                  try:
                     with Progress(
@@ -1228,83 +999,52 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                         console=console,
                         refresh_per_second=PROGRESS_REFRESH_RATE
                     ) as progress:
-                        copy_task = progress.add_task(f"[5/8] Copying {len(files_to_stage)} files...", total=len(files_to_stage))
-                        
+                        copy_task = progress.add_task(f"Copying {len(files_to_stage)} files...", total=len(files_to_stage))
                         dest_dir.mkdir(parents=True, exist_ok=True)
-                        
                         for item in files_to_stage:
-                            # Flatten: Copy directly to PULL_TEMPDIR root with new name
                             s = item['src']
                             d = dest_dir / item['dst_name']
-                            
+                            logger.debug(f"Staging: [dim]{s}[/dim] -> [bold cyan]{d.name}[/bold cyan]")
                             shutil.copy2(s, d)
                             progress.update(copy_task, advance=1, description=f"[dim]Copying: {item['dst_name']}[/dim]")
                     
-                    console.print(f"[green]✓ Successfully staged {len(files_to_stage)} files.[/green]")
+                    logger.info(f"Successfully staged {len(files_to_stage)} files to [bold cyan]{dest_dir}[/bold cyan]")
+                    log_substep(f"Successfully staged {len(files_to_stage)} files.")
                  except Exception as e:
-                    console.print(f"[red][5/8] ✗ Copy failed: {e}[/red]")
-                    if not click.confirm("Continue anyway?"):
-                        break
+                    logger.error(f"Copy failed: {e}")
+                    if not click.confirm("Continue anyway?"): break
 
         # Step 6: Import Files
-        action_msg = "Importing files into library..."
         if simulate:
-            console.print(f"[yellow][6/8] SIMULATE: {action_msg}[/yellow]")
+            logger.info("[SIMULATE] Importing files into library...")
         else:
             if not library:
-                console.print("[red][6/8] ✗ Library root not found. Skipping import.[/red]")
+                logger.error("Library root not found. Skipping import.")
             else:
-                target_dir = None
-                is_new = False
-                if local_series:
-                    target_dir = Path(local_series.path)
-                else:
-                    # New series path logic
-                    date_str = datetime.now().strftime("%Y-%m-%d")
-                    target_dir = Path(library.path) / "Uncategorized" / f"Pulled-{date_str}" / series_name
-                    is_new = True
-                
-                # We need to reconstruct the file list from PULL_TEMPDIR for the import logic
-                # Since we just staged them, PULL_TEMPDIR should be clean.
-                # The original logic used `pulled_files` (list of dicts).
-                # We can reuse `files_to_stage` but update paths to point to PULL_TEMPDIR
+                target_dir = Path(local_series.path) if local_series else Path(library.path) / "Uncategorized" / f"Pulled-{datetime.now().strftime('%Y-%m-%d')}" / series_name
                 
                 files_to_import = []
                 overwrite_count = 0
-                
                 if files_to_stage and PULL_TEMPDIR:
                      for item in files_to_stage:
-                         # Re-map path to staged location
                          staged_path = Path(PULL_TEMPDIR) / item['dst_name']
-                         if not staged_path.exists(): continue # Should exist
-                         
-                         # Item already has v/c/u info
-                         file_info = {
+                         if not staged_path.exists(): continue
+                         files_to_import.append({
                              "path": staged_path,
-                             "v": item['v'],
-                             "c": item['c'],
-                             "u": item['u']
-                         }
-                         files_to_import.append(file_info)
-                         if (target_dir / item['dst_name']).exists():
-                             overwrite_count += 1
+                             "v": item['v'], "c": item['c'], "u": item['u']
+                         })
+                         if (target_dir / item['dst_name']).exists(): overwrite_count += 1
 
                 if files_to_import:
                         if pause:
-                            console.print(f"\n[bold yellow][6/8] Ready to import {len(files_to_import)} files from {PULL_TEMPDIR} into: {target_dir}[/bold yellow]")
+                            console.print(f"\n[bold yellow]Ready to import {len(files_to_import)} files from {PULL_TEMPDIR} into: {target_dir}[/bold yellow]")
                             if overwrite_count > 0:
                                 console.print(f"[bold red]WARNING: {overwrite_count} files already exist in the destination and will be overwritten![/bold red]")
                             
-                            res = click.prompt("[6/8] Press Enter to continue, or 'q' to quit", default="", show_default=False)
-                            if res.lower() == 'q':
-                                console.print("[yellow][6/8] Import aborted by user.[/yellow]")
-                                break
+                            res = click.prompt("Press Enter to continue, or 'q' to quit", default="", show_default=False)
+                            if res.lower() == 'q': break
 
-                        # --- Subfolder Management Logic ---
-                        # Determine if we should use subfolders and what they should be named
                         use_subfolders = False 
-                        
-                        # Gather all volume numbers (local + new)
                         l_v_set, l_c_set = set(), set()
                         if local_series:
                             all_local_vols = local_series.volumes + [v for sg in local_series.sub_groups for v in sg.volumes]
@@ -1315,9 +1055,7 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                         all_vols_set = set(l_v_set)
                         all_chaps_set = set(l_c_set)
                         for f in files_to_import:
-                            all_vols_set.update(f['v'])
-                            all_chaps_set.update(f['c'])
-                            all_chaps_set.update(f['u']) # Treat units as chapters for separation purposes
+                            all_vols_set.update(f['v']); all_chaps_set.update(f['c']); all_chaps_set.update(f['u'])
                         
                         has_volumes = bool(all_vols_set)
                         has_chapters = bool(all_chaps_set)
@@ -1328,118 +1066,104 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                         if all_vols_set:
                             min_v = min(all_vols_set)
                             max_v = max(all_vols_set)
-                            
-                            def fmt_num(n):
-                                return str(int(n)).zfill(2) if n.is_integer() else str(n).zfill(2)
+                            def fmt_num(n): return str(int(n)).zfill(2) if n.is_integer() else str(n).zfill(2)
 
-                            # Desired Folder Names
-                            # Format: {Series} v{Start}-v{End}
                             vol_folder_name = f"{series_name} v{fmt_num(min_v)}-v{fmt_num(max_v)}"
-                            if min_v == max_v:
-                                vol_folder_name = f"{series_name} v{fmt_num(min_v)}"
+                            if min_v == max_v: vol_folder_name = f"{series_name} v{fmt_num(min_v)}"
                                 
-                            # Format: {Series} v{End+1}+
                             chap_start = int(max_v) + 1
                             chap_folder_name = f"{series_name} v{str(chap_start).zfill(2)}+"
                             
-                            # Check for existing structure to rename/adopt
                             existing_vol_dir = None
                             existing_chap_dir = None
-                            
                             s_name_esc = re.escape(series_name)
-                            # Regex to match: Series vXX-vYY OR Series vXX
                             vol_pat = re.compile(rf"^{s_name_esc} v(\d+)(?:-v(\d+))?$", re.IGNORECASE)
-                            # Regex to match: Series vXX+
                             chap_pat = re.compile(rf"^{s_name_esc} v(\d+)\+$", re.IGNORECASE)
 
                             if target_dir.exists():
                                 for item in target_dir.iterdir():
                                     if item.is_dir():
-                                        if vol_pat.match(item.name):
-                                            existing_vol_dir = item
-                                            use_subfolders = True
-                                        elif chap_pat.match(item.name):
-                                            existing_chap_dir = item
-                                            use_subfolders = True
+                                        if vol_pat.match(item.name): existing_vol_dir = item; use_subfolders = True
+                                        elif chap_pat.match(item.name): existing_chap_dir = item; use_subfolders = True
                             
-                            # Logic Update: Only enforce subfolders if we have BOTH types OR existing structure
-                            if not use_subfolders:
-                                if has_volumes and has_chapters:
-                                    use_subfolders = True
+                            if not use_subfolders and has_volumes and has_chapters:
+                                use_subfolders = True
                             
                             if use_subfolders:
-                                # Prepare Paths
                                 target_vol_path = target_dir / vol_folder_name
                                 target_chap_path = target_dir / chap_folder_name
                                 
-                                # Rename Volume Folder if needed
                                 if existing_vol_dir and existing_vol_dir.name != vol_folder_name:
                                     try:
-                                        console.print(f"[dim][6/8] Renaming volume folder: {existing_vol_dir.name} -> {vol_folder_name}[/dim]")
                                         existing_vol_dir.rename(target_vol_path)
                                     except Exception as e:
-                                        console.print(f"[red][6/8] Failed to rename volume folder: {e}[/red]")
-                                        target_vol_path = existing_vol_dir # Fallback
+                                        logger.error(f"Failed to rename volume folder: {e}")
+                                        target_vol_path = existing_vol_dir
                                 
-                                # Rename Chapter Folder if needed
                                 if existing_chap_dir and existing_chap_dir.name != chap_folder_name:
                                     try:
-                                        console.print(f"[dim][6/8] Renaming chapter folder: {existing_chap_dir.name} -> {chap_folder_name}[/dim]")
                                         existing_chap_dir.rename(target_chap_path)
                                     except Exception as e:
-                                        console.print(f"[red][6/8] Failed to rename chapter folder: {e}[/red]")
-                                        target_chap_path = existing_chap_dir # Fallback
+                                        logger.error(f"Failed to rename chapter folder: {e}")
+                                        target_chap_path = existing_chap_dir
+
+                                # Move loose files from root to subfolders if we're now using subfolders
+                                if target_dir.exists():
+                                    if not target_vol_path.exists(): target_vol_path.mkdir(parents=True, exist_ok=True)
+                                    if not target_chap_path.exists(): target_chap_path.mkdir(parents=True, exist_ok=True)
+                                    
+                                    for item in target_dir.iterdir():
+                                        if item.is_file() and item.suffix.lower() in ['.cbz', '.cbr', '.zip', '.rar', '.pdf', '.epub']:
+                                            v_nums, c_nums, u_nums = classify_unit(item.name)
+                                            dest = None
+                                            if v_nums: dest = target_vol_path / item.name
+                                            elif c_nums or u_nums: dest = target_chap_path / item.name
+                                            
+                                            if dest and dest != item:
+                                                try:
+                                                    shutil.move(str(item), str(dest))
+                                                    log_substep(f"Organized existing file {item.name} into subfolder")
+                                                except Exception as e:
+                                                    logger.error(f"Failed to organize existing file {item.name}: {e}")
 
                         imported_count = 0
                         for file_info in files_to_import:
                             f_path = file_info["path"]
-                            dest_folder = target_dir # Default
-                            
-                            # Determine specific destination based on content type
+                            dest_folder = target_dir 
                             if use_subfolders:
-                                if file_info['v']:
-                                    dest_folder = target_vol_path
-                                elif file_info['c'] or file_info['u']:
-                                    dest_folder = target_chap_path
+                                if file_info['v']: dest_folder = target_vol_path
+                                elif file_info['c'] or file_info['u']: dest_folder = target_chap_path
                             
                             try:
-                                if not dest_folder.exists():
-                                    dest_folder.mkdir(parents=True, exist_ok=True)
-                                
+                                if not dest_folder.exists(): dest_folder.mkdir(parents=True, exist_ok=True)
                                 dest_path = dest_folder / f_path.name
-                                # We'll allow overwrite if the user confirmed the prompt above
-                                console.print(f"[dim][6/8] Importing {f_path.name} into {dest_folder.name}[/dim]")
+                                logger.debug(f"Importing: [dim]{f_path.name}[/dim] -> [bold green]{dest_folder.name}[/bold green]")
                                 shutil.copy2(f_path, dest_path)
                                 imported_count += 1
                             except Exception as e:
-                                console.print(f"[red][6/8] ✗ Failed to import {f_path.name}: {e}[/red]")
+                                logger.error(f"Failed to import {f_path.name}: {e}")
                         
                         if imported_count > 0:
-                            console.print(f"[green][6/8] ✓ Successfully imported {imported_count} files.[/green]")
+                            logger.info(f"Successfully imported {imported_count} files into [bold green]{target_dir}[/bold green]")
+                            log_substep(f"Successfully imported {imported_count} files.")
                 else:
-                    console.print("[yellow][6/8] No files to import.[/yellow]")
+                    logger.info("No files to import.")
 
         # Step 7: Update Library State
-        action_msg = "[7/8] Updating library state..."
         if simulate:
-            console.print(f"[yellow][7/8] SIMULATE: {action_msg}[/yellow]")
+            logger.info("[SIMULATE] Updating library state...")
         else:
             if not library:
-                console.print("[red][7/8] ✗ Library object missing. Skipping state update.[/red]")
+                logger.error("Library object missing. Skipping state update.")
             else:
-                with console.status(f"[bold blue]{action_msg}"):
-                    # 1. Re-scan the specific series folder
+                with console.status("[bold blue]Updating library state..."):
                     new_series_obj = scan_series(target_dir)
-                    
                     if local_series:
-                        # Update existing series in library
-                        # Find where it is in the hierarchy and replace it
                         found = False
                         for cat in library.categories:
                             for sub in cat.sub_categories:
                                 for idx, s in enumerate(sub.series):
                                     if s.path == local_series.path:
-                                        # Preserve external_data if we have it
                                         new_series_obj.external_data = s.external_data
                                         sub.series[idx] = new_series_obj
                                         found = True
@@ -1447,102 +1171,75 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                                 if found: break
                             if found: break
                     else:
-                        # Handle New Series in hierarchy
-                        # Structure: Uncategorized -> Pulled-date -> Series
                         date_str = datetime.now().strftime("%Y-%m-%d")
-                        
-                        # Find/Create Uncategorized Category
                         uncat = next((c for c in library.categories if c.name == "Uncategorized"), None)
                         if not uncat:
                             uncat = Category(name="Uncategorized", path=library.path / "Uncategorized")
                             library.categories.append(uncat)
-                        
-                        # Find/Create Pulled-date SubCategory
                         sub_name = f"Pulled-{date_str}"
                         subcat = next((s for s in uncat.sub_categories if s.name == sub_name), None)
                         if not subcat:
                             subcat = Category(name=sub_name, path=uncat.path / sub_name, parent=uncat)
                             uncat.sub_categories.append(subcat)
-                        
-                        # Add new series to subcategory
                         subcat.series.append(new_series_obj)
 
-                    # 2. Save updated library to disk and cache
                     save_library_cache(library)
-                    console.print("[green][7/8] ✓ Library state updated and saved.[/green]")
+                    log_substep("Library state updated and saved.")
 
-                    # 3. Verification
                     v_n, c_n, u_n = [], [], []
                     all_vols = new_series_obj.volumes + [v for sg in new_series_obj.sub_groups for v in sg.volumes]
                     for v in all_vols:
                         vn, cn, un = classify_unit(v.name)
                         v_n.extend(vn); c_n.extend(cn); u_n.extend(un)
                     
-                    v_str = format_ranges(v_n)
-                    c_str = format_ranges(c_n)
-                    u_str = format_ranges(u_n)
-                    console.print(f"[bold blue][7/8] Final Library Content for {series_name}:[/bold blue] Vols: {v_str} | Chaps: {c_str} | Units: {u_str}")
+                    log_substep(f"Final Library Content for {series_name}: Vols: {format_ranges(v_n)} | Chaps: {format_ranges(c_n)}")
 
         # Step 8: Final Cleanup
-        action_msg = "[8/8] Final cleanup: Removing torrent and clearing temp dir..."
         if simulate:
-            console.print(f"[yellow][8/8] SIMULATE: {action_msg}[/yellow]")
+            logger.info("[SIMULATE] Final cleanup...")
         else:
             if pause:
-                console.print(f"\n[bold red][8/8]Ready for final cleanup for: {series_name}[/bold red]")
-                console.print(f"[dim] - Will delete torrent and source data: {t['name']}[/dim]")
-                console.print(f"[dim] - Will clear temporary pull directory: {PULL_TEMPDIR}[/dim]")
-                res = click.prompt("[8/8]Press Enter to execute cleanup, or 'q' to skip cleanup for this item", default="", show_default=False)
-                if res.lower() == 'q':
-                    console.print("[yellow][8/8]Cleanup skipped by user.[/yellow]")
-                    continue
+                console.print(f"\n[bold red]Ready for final cleanup for: {series_name}[/bold red]")
+                res = click.prompt("Press Enter to execute cleanup, or 'q' to skip", default="", show_default=False)
+                if res.lower() == 'q': continue
 
-            with console.status(f"[bold blue]{action_msg}"):
-                # 1. Remove torrent and data from qBittorrent
+            with console.status("[bold blue]Final cleanup..."):
                 if qbit.delete_torrents([t["hash"]], delete_files=True):
-                    console.print("[green][8/8]✓ Torrent and source data removed from qBittorrent.[/green]")
+                    log_substep("Torrent removed from qBittorrent")
                 else:
-                    console.print("[red][8/8]✗ Failed to remove torrent from qBittorrent.[/red]")
+                    logger.error("Failed to remove torrent from qBittorrent")
 
-                # 2. Clear PULL_TEMPDIR
                 if PULL_TEMPDIR and os.path.exists(PULL_TEMPDIR):
-                    temp_path = Path(PULL_TEMPDIR)
-                    for item in temp_path.iterdir():
+                    for item in Path(PULL_TEMPDIR).iterdir():
                         try:
-                            if item.is_dir():
-                                shutil.rmtree(item)
-                            else:
-                                item.unlink()
+                            if item.is_dir(): shutil.rmtree(item)
+                            else: item.unlink()
                         except Exception as e:
-                            console.print(f"[red][8/8]✗ Failed to clear temp item {item.name}: {e}[/red]")
-                    console.print("[green][8/8]✓ Temporary pull directory cleared.[/green]")
+                            logger.error(f"Failed to clear temp item {item.name}: {e}")
+                    log_substep("Temporary pull directory cleared")
 
-                # 3. Update match results
                 if match_data:
                     found_entry = False
                     for entry in match_data:
-                        # We match by name and the fact that it was previously marked as "grabbed"
                         if entry.get("name") == t["name"] and entry.get("grab_status") == "grabbed":
                             entry["grab_status"] = "pulled"
                             found_entry = True
-                            # We don't break because there might be multiple entries for the same torrent 
-                            # (though unlikely with name+grabbed filter, but safe)
                     
                     if found_entry:
                         try:
                             with open(input_file, 'w', encoding='utf-8') as f:
                                 json.dump(match_data, f, indent=2)
-                            console.print(f"[green][8/8]✓ Updated {input_file}: {t['name']} marked as pulled.[/green]")
+                            log_substep(f"Updated {input_file}: {t['name']} marked as pulled.")
                         except Exception as e:
-                            console.print(f"[red][8/8]✗ Failed to update {input_file}: {e}[/red]")
+                            logger.error(f"Failed to update {input_file}: {e}")
 
-        console.print(f"[green][8/8]✓ Finished processing {display_name}[/green]")
+        logger.info(f"Finished processing {display_name}")
         
         if (pause or simulate) and i < len(completed) - 1:
             res = click.prompt("Press Enter to continue to the next item, or 'q' to quit", default="", show_default=False)
             if res.lower() == 'q':
-                console.print("[yellow]Post-processing aborted by user.[/yellow]")
+                logger.info("Post-processing aborted by user.")
                 break
 
-    console.print(f"\n[bold green]Finished pulling {len(completed)} torrents![/bold green]")
+    logger.info(f"Finished pulling {len(completed)} torrents!")
 

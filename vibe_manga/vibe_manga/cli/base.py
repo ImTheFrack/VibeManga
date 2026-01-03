@@ -33,11 +33,9 @@ from ..constants import (
     DEEP_ANALYSIS_REFRESH_RATE,
     ROLE_CONFIG
 )
+from ..logging import get_logger, log_substep, console
 
-# Initialize Rich Console
-console = Console()
-
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 def get_library_root() -> Path:
     """
@@ -138,6 +136,8 @@ def run_scan_with_progress(
 
             line2_str = f"{time_remaining} | {gb:.2f} GB | Vols: {stats_cache['vols']} | {series.name}"
             status_text.plain = line2_str
+            
+            log_substep(f"Scanned: {series.name}")
 
         logger.info(f"Starting library scan: {root_path}")
         library = scan_library(root_path, progress_callback=update_progress, existing_library=existing_library)

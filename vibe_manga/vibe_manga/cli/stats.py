@@ -29,8 +29,9 @@ from ..constants import (
     CLEAN_WORD_RE,
     STOP_WORDS
 )
+from ..logging import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 @click.command()
 @click.argument("query", required=False)

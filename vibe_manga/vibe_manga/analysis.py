@@ -76,10 +76,13 @@ FALLBACK_NUMBER_REGEX = re.compile(r'\b(\d+(?:\.\d+)?)\b')
 # 5. Implicit Ranges (001-099) - Used if no explicit prefixes found
 IMPLICIT_RANGE_REGEX = re.compile(r'\b(\d+(?:\.\d+)?)\s*[-~]\s*(\d+(?:\.\d+)?)\b')
 
+# 6. Implicit Single Numbers (e.g. 106). We only strip 2+ digits to avoid 
+# false positives in titles (e.g. "1 HP", "3x3 Eyes").
+IMPLICIT_SINGLE_REGEX = re.compile(r'\b(\d{2,}(?:\.\d+)?)\b')
+
 # Patterns to strip BEFORE parsing numbers
 STRIP_PATTERNS = [
-    re.compile(r'\(\s*(?:19|20)\d{2}\s*\)'),  # Years in parens: (2021)
-    re.compile(r'\[\s*(?:19|20)\d{2}\s*\]'),  # Years in brackets: [2021]
+    re.compile(r'[\(\[]\s*(?:19|20)\d{2}(?:\s*[-~]\s*(?:19|20)\d{2})?\s*[\)\]]'),  # Years or Year Ranges: (2021), [2017-2025]
     re.compile(r'\b(?:Season|S)\s*\d+', re.IGNORECASE), # Season 1, S01
     re.compile(r'\b(?:Part|Pt)\s*\d+', re.IGNORECASE),  # Part 1, Pt 1
     re.compile(r'\b(?:Year)\s*\d+', re.IGNORECASE),     # Year 1
@@ -89,6 +92,16 @@ STRIP_PATTERNS = [
     re.compile(r'\d+%', re.IGNORECASE),                  # Percentages: 100%
     re.compile(r'\d+\s*[:꞉：]\s*\d+', re.IGNORECASE),    # Time-like patterns: 23:45, 10:00 (Standard, Modifier, Fullwidth)
     re.compile(r'\bNo\.\s*\d+', re.IGNORECASE),          # No. 8, No. 6
+]
+
+# Patterns for advanced title cleaning (used in strip_volume_info)
+ADVANCED_STRIP_PATTERNS = STRIP_PATTERNS + [
+    # "001-015 as v01-03" pattern
+    re.compile(r'\b[\d\.x]+(?:[-\.][\d\.x]+)?\s+as\s+v?\d+(?:[-\.]\d+)?(?:\s*\+\s*\d+(?:\.\d+)?(?:[-\s]\d+(?:\.\d+)?)?)?', re.IGNORECASE),
+    # Batch range indicators often found at the end of titles (e.g. "Series Name 001-050")
+    # We want to be careful not to strip year-like numbers or simple volume numbers that should be handled by VOL_REGEX
+    # This targets specifically large ranges often seen in batch torrents
+    re.compile(r'\b\d{2,3}-\d{2,3}\b'),
 ]
 
 # Patterns specifically for number parsing (includes series titles that look like numbers)
@@ -150,7 +163,7 @@ def strip_volume_info(name: str) -> str:
     """
     s = name
     # 1. Strip Generic Noise (but keep series titles)
-    for pattern in STRIP_PATTERNS:
+    for pattern in ADVANCED_STRIP_PATTERNS:
         s = pattern.sub(" ", s)
     
     # 2. Strip Vol/Ch/Unit
@@ -159,6 +172,18 @@ def strip_volume_info(name: str) -> str:
     s = CH_REGEX.sub(" ", s)
     s = UNIT_REGEX.sub(" ", s)
     s = IMPLICIT_RANGE_REGEX.sub(" ", s)
+    s = IMPLICIT_SINGLE_REGEX.sub(" ", s)
+    
+    # 3. Final Cleanup
+    # Strip common noise tags that often remain
+    s = re.sub(r'\[.*?\]|\(.*?\)|\{.*?\}', ' ', s)
+    # Strip loose punctuation and math symbols often found between numbers
+    # We EXCLUDE ampersands (&) here because they are frequently part of the title.
+    s = re.sub(r'\s+[\+\-\~\|]\s+|\s+[\+\-\~\|]$|^[\+\-\~\|]\s+', ' ', s)
+    # Strip trailing punctuation like hyphens, pluses, dots
+    s = s.strip().rstrip(' -+~|.')
+    # Collapse whitespace
+    s = re.sub(r'\s+', ' ', s)
     
     return s.strip()
 

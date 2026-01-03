@@ -2,8 +2,9 @@ import os
 import requests
 import logging
 from typing import Optional, List, Dict, Any
+from .logging import get_logger, log_api_call
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class QBitAPI:
     def __init__(self):
@@ -21,6 +22,7 @@ class QBitAPI:
             "username": self.username,
             "password": self.password
         }
+        log_api_call(login_url, "POST", params=data)
         try:
             response = self.session.post(login_url, headers=headers, data=data)
             if response.status_code == 200 and "SID" in self.session.cookies:
@@ -47,6 +49,7 @@ class QBitAPI:
             "tags": (None, tag),
             "savepath": (None, savepath)
         }
+        log_api_call(add_url, "POST", params={"count": len(urls), "tag": tag})
 
         try:
             response = self.session.post(add_url, files=files)
@@ -69,6 +72,7 @@ class QBitAPI:
         params = {}
         if tag:
             params["tag"] = tag
+        log_api_call(info_url, "GET", params=params)
 
         try:
             response = self.session.get(info_url, params=params)
@@ -89,6 +93,7 @@ class QBitAPI:
         # Try 'stop' first (qBit 4.6.0+)
         stop_url = f"{self.base_url}/api/v2/torrents/stop"
         data = {"hashes": "|".join(hashes)}
+        log_api_call(stop_url, "POST", params={"count": len(hashes)})
 
         try:
             response = self.session.post(stop_url, data=data)
@@ -120,6 +125,7 @@ class QBitAPI:
             "hashes": "|".join(hashes),
             "deleteFiles": "true" if delete_files else "false"
         }
+        log_api_call(delete_url, "POST", params={"count": len(hashes), "delete_files": delete_files})
 
         try:
             response = self.session.post(delete_url, data=data)

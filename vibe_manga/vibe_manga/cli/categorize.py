@@ -29,8 +29,9 @@ from ..constants import (
     BYTES_PER_GB,
     PROGRESS_REFRESH_RATE
 )
+from ..logging import get_logger, log_step, log_substep
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 def manual_select_category(library: Library) -> Optional[Tuple[str, str]]:
     """Interactive manual category selection helper."""
@@ -104,6 +105,7 @@ def manual_select_category(library: Library) -> Optional[Tuple[str, str]]:
 
 def display_ai_council_config() -> None:
     """Displays the active AI model configuration for the categorization council."""
+    log_step("AI Council Configuration")
     console.print(Rule("[bold magenta]AI Council Configuration[/bold magenta]"))
     
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan", expand=True)
@@ -278,6 +280,7 @@ def categorize(query: Optional[str], auto: bool, simulate: bool, no_cache: bool,
 
     countcurserries = 1
     for series in target_series:
+        log_substep(f"Categorizing: {series.name}")
         console.print(Rule(f"[bold blue][{countcurserries} of {len(target_series)}] Processing: {series.name}[/bold blue]"))
         countcurserries += 1     
         user_feedback = None
@@ -374,6 +377,8 @@ def categorize(query: Optional[str], auto: bool, simulate: bool, no_cache: bool,
                     cons_text = f"[bold green]{final_cat}/{final_sub}[/bold green] (Conf: {conf:.2f})"
                     cons_reason = f"[dim]{reason}[/dim]"
                     cons_panel = Panel(f"{cons_text}\n{cons_reason}", title="Consensus", border_style="yellow")
+
+                    log_substep(f"Consensus: {final_cat}/{final_sub} (Conf: {conf:.2f})")
 
                     console.print(meta_text)
                     if syn_panel: console.print(syn_panel)

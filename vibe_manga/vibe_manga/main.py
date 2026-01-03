@@ -1,13 +1,15 @@
-import logging
 import click
 from dotenv import load_dotenv, find_dotenv
 
 # Load environment variables immediately
 load_dotenv(find_dotenv())
 
-from rich.logging import RichHandler
-
 from .ai_api import tracker
+from .logging import setup_logging, get_logger, log_substep
+
+# Initialize global logging
+setup_logging()
+logger = get_logger(__name__)
 
 # CLI Imports
 from .cli.base import (
@@ -30,27 +32,6 @@ from .cli.tree import tree
 from .cli.show import show
 from .cli.dedupe import dedupe
 from .cli.stats import stats
-
-# Configure logging
-log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-# File Handler (Full Detail) - Use UTF-8 to prevent encoding errors on Windows
-file_handler = logging.FileHandler('vibe_manga.log', encoding='utf-8')
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(log_formatter)
-
-# Stream Handler (Console - Errors and Warnings) - Use RichHandler for better Unicode support
-stream_handler = RichHandler(console=console, show_path=False, keywords=[])
-stream_handler.setLevel(logging.WARNING)
-
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-# Clear existing handlers to avoid duplicates
-root_logger.handlers = []
-root_logger.addHandler(file_handler)
-root_logger.addHandler(stream_handler)
-
-logger = logging.getLogger(__name__)
 
 @click.group()
 def cli():

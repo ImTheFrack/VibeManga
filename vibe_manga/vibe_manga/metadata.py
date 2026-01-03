@@ -14,8 +14,9 @@ from .config import get_ai_role_config, get_config
 from .analysis import semantic_normalize
 from .models import SeriesMetadata
 from .cache import load_resolution_cache, save_resolution_cache
+from .logging import get_logger, log_api_call
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # Jikan API constants
 JIKAN_BASE_URL = "https://api.jikan.moe/v4"
@@ -154,6 +155,7 @@ def fetch_by_id_from_jikan(mal_id: int, status_callback: Optional[callable] = No
 
     # 2. Fallback to API
     url = f"{JIKAN_BASE_URL}/manga/{mal_id}"
+    log_api_call(url, "GET", params={"id": mal_id})
     try:
         if status_callback:
             status_callback(f"Fetching ID {mal_id} from Jikan...")
@@ -248,6 +250,7 @@ def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> 
                 "limit": 15,  # Fetch more to find a better match
                 "sfw": "false" # Include mature content since we are a manga library
             }
+            log_api_call(search_url, "GET", params=params)
             
             resp = requests.get(search_url, params=params, timeout=10)
             

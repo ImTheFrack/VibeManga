@@ -10,8 +10,9 @@ from .constants import (
     LOCAL_AI_BASE_URL, LOCAL_AI_API_KEY, LOCAL_AI_MODEL,
     AI_TIMEOUT, AI_MAX_RETRIES, ROLE_CONFIG
 )
+from .logging import get_logger, log_api_call
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class TokenTracker:
     """Tracks token usage across the session."""
@@ -129,6 +130,7 @@ def get_available_models(provider: Literal["remote", "local"]) -> List[str]:
         headers["HTTP-Referer"] = "https://github.com/vibe-manga/vibemanga"
         headers["X-Title"] = "VibeManga CLI"
 
+    log_api_call(endpoint, "GET")
     try:
         response = requests.get(endpoint, headers=headers, timeout=10)
         response.raise_for_status()
@@ -230,6 +232,8 @@ def call_ai(
     # Re-verify it ends correctly if it was already partially set
     if endpoint.endswith("/v1"):
         endpoint = f"{endpoint}/chat/completions"
+
+    log_api_call(endpoint, "POST", params={"model": target_model, "temp": temperature, "len": len(user_prompt)})
 
     for attempt in range(AI_MAX_RETRIES + 1):
         try:

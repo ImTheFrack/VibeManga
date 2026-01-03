@@ -124,6 +124,46 @@ class LibraryIndex:
             
         return self.title_map.get(norm, [])
 
+    def fuzzy_search(self, query: str, threshold: float = 0.8) -> List[Union[Series, LightweightSeries]]:
+        """
+        Searches for a series using fuzzy string matching against indexed titles.
+        O(N) where N is the number of unique title strings in the library.
+        """
+        if not self.is_built:
+            logger.warning("Fuzzy search called before index is built.")
+            return []
+
+        norm_query = semantic_normalize(query)
+        if not norm_query:
+            return []
+
+        best_match = None
+        best_ratio = 0.0
+        
+        # Iterate unique keys (much faster than iterating all series objects)
+        import difflib, re
+        
+        for indexed_title in self.title_map.keys():
+            ratio = difflib.SequenceMatcher(None, norm_query, indexed_title).ratio()
+            
+            if ratio > best_ratio:
+                # Enforce number consistency for high-confidence matches
+                if ratio >= threshold:
+                    nums_a = [int(n) for n in re.findall(r'\d+', norm_query)]
+                    nums_b = [int(n) for n in re.findall(r'\d+', indexed_title)]
+                    if nums_a != nums_b:
+                        continue
+                
+                best_ratio = ratio
+                if ratio >= threshold:
+                    best_match = self.title_map[indexed_title]
+
+        if best_match and best_ratio >= threshold:
+            # Return all series associated with this key (usually just one)
+            return best_match
+            
+        return []
+
     def get_by_id(self, mal_id: int) -> Optional[Union[Series, LightweightSeries]]:
         """Returns a series by MAL ID."""
         if not self.is_built:
