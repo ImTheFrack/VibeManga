@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, asdict
 from typing import Optional
 from datetime import datetime
+from urllib.parse import quote_plus
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -86,7 +87,8 @@ def _parse_row(row) -> Torrent | None:
 def scrape_nyaa(
     pages: int = c.NYAA_DEFAULT_PAGES_TO_SCRAPE,
     user_agent: Optional[str] = None,
-    stop_at_timestamp: Optional[int] = None
+    stop_at_timestamp: Optional[int] = None,
+    query: Optional[str] = None
 ):
     """
     Scrapes the first N pages of nyaa.si for English-translated literature.
@@ -96,12 +98,12 @@ def scrape_nyaa(
         user_agent: An optional user agent string to override the default.
         stop_at_timestamp: If provided, stop scraping when a torrent with this
                            timestamp (or older) is found.
+        query: Optional search query.
 
     Returns:
         A list of dictionaries, where each dictionary represents a torrent.
     """
     all_torrents = []
-    url_template = c.NYAA_ENGLISH_TRANSLATED_URL_TEMPLATE
     
     headers = {"User-Agent": user_agent or c.SCRAPER_USER_AGENT}
     
@@ -119,10 +121,17 @@ def scrape_nyaa(
     display_group = Group(progress, status_text)
 
     with Live(display_group, console=console, refresh_per_second=10):
-        task_id = progress.add_task("[bold cyan]Scraping Nyaa...", total=pages)
+        task_desc = f"[bold cyan]Searching Nyaa for '{query}'..." if query else "[bold cyan]Scraping Nyaa..."
+        task_id = progress.add_task(task_desc, total=pages)
 
         for page_num in range(1, pages + 1):
-            url = url_template.format(page=page_num)
+            if query:
+                # Use search template
+                url = c.NYAA_SEARCH_URL_TEMPLATE.format(query=quote_plus(query), page=page_num)
+            else:
+                # Use default template
+                url = c.NYAA_ENGLISH_TRANSLATED_URL_TEMPLATE.format(page=page_num)
+            
             status_text.plain = f"Fetching Page {page_num}/{pages}: {url}"
             
             try:
@@ -131,6 +140,11 @@ def scrape_nyaa(
 
                 soup = BeautifulSoup(response.text, "lxml")
                 rows = soup.select(c.NYAA_TORRENT_TABLE_SELECTOR)
+
+                if not rows and query:
+                    # If searching and no rows found, we've likely reached the end of results
+                    status_text.plain = f"No results on page {page_num}. Stopping."
+                    break
 
                 for row in rows:
                     torrent_data = _parse_row(row)

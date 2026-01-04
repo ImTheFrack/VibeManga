@@ -95,9 +95,12 @@ DEEP_ANALYSIS_REFRESH_RATE = 5  # Refresh per second for deep analysis
 # Scraper Configuration
 NYAA_BASE_URL = "https://nyaa.si"
 NYAA_ENGLISH_TRANSLATED_URL_TEMPLATE = f"{NYAA_BASE_URL}/?f=0&c=3_1&q=&p={{page}}"
+NYAA_SEARCH_URL_TEMPLATE = f"{NYAA_BASE_URL}/?f=0&c=3_1&q={{query}}&p={{page}}"
 SCRAPER_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
 SCRAPER_RATE_LIMIT_PER_SECOND = 3
 NYAA_DEFAULT_OUTPUT_FILENAME = "nyaa_scrape_results.json"
+SCRAPE_HISTORY_FILENAME = "vibe_manga_scrape_history.json"
+SCRAPE_QUERY_COOLDOWN_DAYS = 30
 SCRAPER_RETRY_COUNT = 3
 SCRAPER_RETRY_BACKOFF_FACTOR = 0.5
 SCRAPER_TIMEOUT_SECONDS = 15

@@ -290,7 +290,7 @@ def generate_transfer_plan(source_root: Path, series_name: str) -> List[Dict]:
         
     return plan
 
-def process_grab(name: Optional[str], input_file: str, status: bool, root_path: str, auto_add: bool = False, auto_add_only: bool = False, max_downloads: Optional[int] = None) -> None: 
+def process_grab(name: Optional[str], input_file: str, status: bool, root_path: str, auto_add: bool = False, auto_add_only: bool = False, force: bool = False, max_downloads: Optional[int] = None) -> None: 
     """
     Selects a manga from matched results and adds it to qBittorrent.
     
@@ -300,7 +300,8 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
         status: If True, show current qBittorrent status instead of grabbing.
         root_path: Path to the library root directory.
         auto_add: If True, automatically grab new volumes without prompting.
-        auto_add_only: If True, same as auto_add but skips non-matching groups instead of prompting.
+        auto_add_only: If True, same as auto-add but skips non-matching groups instead of prompting.
+        force: If True, process items even if they have skipautoadd/skipautoaddonly status.
         max_downloads: Maximum number of items to auto-add before stopping.
     """
     qbit = QBitAPI()
@@ -402,14 +403,16 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                 if status_val in terminal_statuses:
                     is_processed = True
                     break
-                # skipautoadd: Skip if in any auto-add mode (prompting or only)
-                if (auto_add or auto_add_only) and status_val == "skipautoadd":
-                    is_processed = True
-                    break
-                # skipautoaddonly: Skip only if in auto-add-only mode
-                if auto_add_only and status_val == "skipautoaddonly":
-                    is_processed = True
-                    break
+                
+                if not force:
+                    # skipautoadd: Skip if in any auto-add mode (prompting or only)
+                    if (auto_add or auto_add_only) and status_val == "skipautoadd":
+                        is_processed = True
+                        break
+                    # skipautoaddonly: Skip only if in auto-add-only mode
+                    if auto_add_only and status_val == "skipautoaddonly":
+                        is_processed = True
+                        break
             
             if not is_processed:
                 start_idx = i
@@ -434,6 +437,27 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
             for e in data:
                 if any(n in group_names for n in e.get("parsed_name", [])):
                     group_files.append(e)
+
+            # Check if group is fully processed (all files have terminal status)
+            # This prevents showing prompts for groups where we've already grabbed/skipped everything
+            check_statuses = {"grabbed", "skipped", "pulled", "blacklisted"}
+            if not force:
+                if auto_add or auto_add_only:
+                    check_statuses.add("skipautoadd")
+                if auto_add_only:
+                    check_statuses.add("skipautoaddonly")
+            
+            all_processed = True
+            for f in group_files:
+                if f.get("grab_status") not in check_statuses:
+                    all_processed = False
+                    break
+            
+            if all_processed:
+                status.update(f"[dim]Skipping processed group {current_idx + 1}/{len(manga_groups)}: {', '.join(group['parsed_name'])}[/dim]")
+                groups_skipped += 1
+                current_idx += 1
+                continue
 
             match_id = group.get("matched_id")
             local_series = series_map.get(match_id) if match_id else None
@@ -464,10 +488,37 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                 l_v_set = set(l_v_nums)
                 l_c_set = set(l_c_nums)
                 
+                # Heuristic: If we have volumes, assume each covers ~6 chapters
+                # Any chapter number below this cutoff is likely redundant/subsumed
+                max_local_vol = max(l_v_set) if l_v_set else 0
+                cutoff_chapter = max_local_vol * 6
+                
+                # Dynamic Heuristic: Check if any file in the group provides a "Rosetta Stone"
+                # (mapping volumes to chapters, e.g., "001-025 as v01-02")
+                # If so, use that ratio to calibrate our cutoff.
+                for f in group_files:
+                    try:
+                        f_ve = f.get("volume_end")
+                        f_ce = f.get("chapter_end")
+                        if f_ve and f_ce:
+                            val_ve = float(f_ve)
+                            val_ce = float(f_ce)
+                            if val_ve > 0:
+                                ratio = val_ce / val_ve
+                                # If the ratio is reasonable (e.g. > 3 chaps/vol), use it
+                                if ratio > 3:
+                                    implied_cutoff = max_local_vol * ratio
+                                    if implied_cutoff > cutoff_chapter:
+                                        cutoff_chapter = implied_cutoff
+                    except (ValueError, TypeError):
+                        pass
+
                 # Define statuses to skip for content analysis
-                skip_content = ["grabbed", "skipped", "pulled", "blacklisted", "skipautoadd"]
-                if auto_add_only:
-                    skip_content.append("skipautoaddonly")
+                skip_content = ["grabbed", "skipped", "pulled", "blacklisted"]
+                if not force:
+                    skip_content.append("skipautoadd")
+                    if auto_add_only:
+                        skip_content.append("skipautoaddonly")
 
                 for f in group_files:
                     # Skip already processed files from content analysis
@@ -479,15 +530,52 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                         max_torrent_bytes = t_bytes
 
                     v_s, v_e = f.get("volume_begin"), f.get("volume_end")
+                    file_has_vols = False
+                    all_vols_known = True
+
                     if v_s is not None:
+                        file_has_vols = True
                         try:
                             s, e = float(v_s), float(v_e or v_s)
                             if s.is_integer() and e.is_integer():
                                 for n in range(int(s), int(e) + 1):
-                                    if float(n) not in l_v_set: new_v.add(float(n))
+                                    if float(n) not in l_v_set: 
+                                        new_v.add(float(n))
+                                        all_vols_known = False
                             else:
-                                if s not in l_v_set: new_v.add(s)
-                                if e not in l_v_set: new_v.add(e)
+                                if s not in l_v_set: 
+                                    new_v.add(s)
+                                    all_vols_known = False
+                                if e not in l_v_set: 
+                                    new_v.add(e)
+                                    all_vols_known = False
+                        except (ValueError, TypeError): 
+                            all_vols_known = False
+
+                    # If the file defines volumes and we have all of them, check if chapters are redundant.
+                    # Heuristic: If chapter start is within range of the volumes (e.g. <= vol_end * 5),
+                    # assume chapters are just describing the volume content.
+                    if file_has_vols and all_vols_known:
+                        c_s_check = f.get("chapter_begin")
+                        try:
+                            if c_s_check:
+                                s_check = float(c_s_check)
+                                v_e_val = float(v_e or v_s) if v_s else 0
+                                # If chapters start "early" (within conservative 5 ch/vol), ignore them
+                                if s_check <= v_e_val * 5:
+                                    continue
+                        except (ValueError, TypeError): pass
+                        # If chapters start "late" (e.g. v1-3 + c26), fall through to check against local cutoff
+
+                    # Heuristic: "Start at 1" Skip
+                    # If we have volumes locally, and this file is a chapter batch starting at 1 (or 0),
+                    # assume it's a redundant compilation covered by our volumes.
+                    # We prefer to grab "Vol X" or "Ch X-Y" where X > 1.
+                    if l_v_set and not file_has_vols:
+                        c_s_check = f.get("chapter_begin")
+                        try:
+                            if c_s_check and float(c_s_check) <= 1.0:
+                                continue
                         except (ValueError, TypeError): pass
                     
                     c_s, c_e = f.get("chapter_begin"), f.get("chapter_end")
@@ -496,10 +584,11 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                             s, e = float(c_s), float(c_e or c_s)
                             if s.is_integer() and e.is_integer():
                                 for n in range(int(s), int(e) + 1):
-                                    if float(n) not in l_c_set: new_c.add(float(n))
+                                    if float(n) not in l_c_set and float(n) > cutoff_chapter:
+                                        new_c.add(float(n))
                             else:
-                                if s not in l_c_set: new_c.add(s)
-                                if e not in l_c_set: new_c.add(e)
+                                if s not in l_c_set and s > cutoff_chapter: new_c.add(s)
+                                if e not in l_c_set and e > cutoff_chapter: new_c.add(e)
                         except (ValueError, TypeError): pass
 
                 # Auto-skip if no new content
@@ -546,9 +635,11 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
 
                 for f in sorted_group_files:
                     # Skip files that are terminal or already skipped for auto-add in this mode
-                    skip_eval = ["grabbed", "skipped", "pulled", "blacklisted", "skipautoadd"]
-                    if auto_add_only:
-                        skip_eval.append("skipautoaddonly")
+                    skip_eval = ["grabbed", "skipped", "pulled", "blacklisted"]
+                    if not force:
+                        skip_eval.append("skipautoadd")
+                        if auto_add_only:
+                            skip_eval.append("skipautoaddonly")
                         
                     if f.get("grab_status") in skip_eval:
                         continue
@@ -557,7 +648,14 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                     if is_jxl(f):
                         continue
 
-                    v_nums, _, _ = classify_unit(f.get("name", ""))
+                    # Skip torrents with less than 2 seeders for reliability
+                    try:
+                        if int(f.get("seeders", 0)) < 2:
+                            continue
+                    except (ValueError, TypeError):
+                        continue
+
+                    v_nums, c_nums, u_nums = classify_unit(f.get("name", ""))
                     
                     # Criterion 1: New Volumes
                     if v_nums:
@@ -582,11 +680,15 @@ def process_grab(name: Optional[str], input_file: str, status: bool, root_path: 
                                 volumes_handled_in_group.update(v_to_check)
                                 continue # Move to next file
                 
-                    # Criterion 2: New Series + "Completed" tag (Handles Chapter-only series)
-                    if not local_series and is_completed(f) and not added_via_completed:
+                    # Criterion 2: New Series + ("Completed" tag OR > 10 chapters)
+                    # For chapter-only series, we want to grab if it has a significant chunk of chapters
+                    has_significant_content = len(set(c_nums + u_nums)) >= 10
+
+                    if not local_series and (is_completed(f) or has_significant_content) and not added_via_completed:
                         # Check if we already grabbed a 'completed' set (or volumes) to avoid duplicates
                         # If it's a chapter-only series, volumes_handled_in_group will be empty.
-                        files_to_auto_add.append((f, "New completed series"))
+                        reason = "New completed series" if is_completed(f) else "New series with significant chapters"
+                        files_to_auto_add.append((f, reason))
                         added_via_completed = True
             
                 if files_to_auto_add:

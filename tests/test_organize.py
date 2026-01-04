@@ -36,10 +36,11 @@ def mock_library():
     lib.categories = [cat1, cat2]
     return lib
 
+@patch("vibe_manga.vibe_manga.cli.organize.suggest_category")
 @patch("vibe_manga.vibe_manga.cli.organize.run_scan_with_progress")
 @patch("vibe_manga.vibe_manga.cli.organize.get_library_root")
 @patch("vibe_manga.vibe_manga.cli.organize.LibraryIndex")
-def test_organize_simulate_filtering(mock_index_cls, mock_get_root, mock_scan, mock_library):
+def test_organize_simulate_filtering(mock_index_cls, mock_get_root, mock_scan, mock_suggest, mock_library):
     """Test that filters correctly select candidates."""
     runner = CliRunner()
     
@@ -48,6 +49,19 @@ def test_organize_simulate_filtering(mock_index_cls, mock_get_root, mock_scan, m
     mock_get_root.return_value = Path("/tmp/lib")
     mock_index = MagicMock()
     mock_index_cls.return_value = mock_index
+    
+    # Mock suggest_category to return valid response (avoid network)
+    metadata_mock = MagicMock()
+    metadata_mock.genres = ["Action"]
+    metadata_mock.demographics = ["Shonen"]
+    metadata_mock.release_year = 2020
+    metadata_mock.synopsis = "A synopsis."
+
+    mock_suggest.return_value = {
+        "consensus": {"final_category": "Manga", "final_sub_category": "General", "reason": "Test", "confidence_score": 1.0},
+        "moderation": {"classification": "SAFE"},
+        "practical": {}, "creative": {}, "metadata": metadata_mock
+    }
     
     # Mock index search to return everything for query tests or specific items
     # For now we won't test query deeply unless we mock search logic.
@@ -86,3 +100,71 @@ def test_organize_simulate_filtering(mock_index_cls, mock_get_root, mock_scan, m
     assert result.exit_code == 0
     # Both start with Manga, so both excluded.
     assert "No series matched" in result.output
+
+
+@patch("vibe_manga.vibe_manga.cli.organize.suggest_category")
+@patch("vibe_manga.vibe_manga.cli.organize.run_scan_with_progress")
+@patch("vibe_manga.vibe_manga.cli.organize.get_library_root")
+@patch("vibe_manga.vibe_manga.cli.organize.LibraryIndex")
+def test_organize_execution_ai_call(mock_index_cls, mock_get_root, mock_scan, mock_suggest, mock_library):
+    """Test that AI is called when target is not specified."""
+    runner = CliRunner()
+    
+    mock_scan.return_value = mock_library
+    mock_get_root.return_value = Path("/tmp/lib")
+    
+    # Mock AI response
+    metadata_mock = MagicMock()
+    metadata_mock.genres = ["Action"]
+    metadata_mock.demographics = ["Shonen"]
+    metadata_mock.release_year = 2020
+    metadata_mock.synopsis = "A synopsis."
+
+    mock_suggest.return_value = {
+        "consensus": {
+            "final_category": "Manga",
+            "final_sub_category": "Ninja",
+            "reason": "It's about ninjas",
+            "confidence_score": 0.99
+        },
+        "moderation": {"classification": "SAFE"},
+        "practical": {},
+        "creative": {},
+        "metadata": metadata_mock
+    }
+    
+    # Run against Naruto (Ninja tag)
+    result = runner.invoke(cli, ["organize", "--tag", "Ninja", "--simulate", "--auto"])
+    
+    assert result.exit_code == 0
+    
+    # Should call suggest_category
+    mock_suggest.assert_called_once()
+    
+    # Verify destination output (Simulate mode)
+    # Should move to Manga/Ninja (from consensus)
+    assert "Manga/Ninja" in result.output
+    assert "Naruto" in result.output
+
+@patch("vibe_manga.vibe_manga.cli.organize.suggest_category")
+@patch("vibe_manga.vibe_manga.cli.organize.run_scan_with_progress")
+@patch("vibe_manga.vibe_manga.cli.organize.get_library_root")
+@patch("vibe_manga.vibe_manga.cli.organize.LibraryIndex")
+def test_organize_execution_direct_target(mock_index_cls, mock_get_root, mock_scan, mock_suggest, mock_library):
+    """Test that AI is skipped when explicit target is provided."""
+    runner = CliRunner()
+    
+    mock_scan.return_value = mock_library
+    mock_get_root.return_value = Path("/tmp/lib")
+    
+    # Run against Naruto with explicit target
+    result = runner.invoke(cli, ["organize", "--tag", "Ninja", "--target", "Archive/Old", "--simulate", "--auto"])
+    
+    assert result.exit_code == 0
+    
+    # Should NOT call suggest_category
+    mock_suggest.assert_not_called()
+    
+    # Verify destination output
+    assert "Archive/Old" in result.output
+    assert "Naruto" in result.output

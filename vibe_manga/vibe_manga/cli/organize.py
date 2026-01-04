@@ -8,25 +8,133 @@ import click
 import logging
 import queue
 import threading
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 
 from rich.console import Console
 from rich.prompt import Confirm
 from rich.panel import Panel
 from rich.text import Text
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn, TransferSpeedColumn
+from rich.table import Table
+from rich import box
+from rich.rule import Rule
 
 from .base import console, run_scan_with_progress, get_library_root, run_model_assignment
 from ..indexer import LibraryIndex
 from ..categorizer import suggest_category, get_category_list
 from ..models import Series, Library, Category
 from ..scanner import scan_library
+from ..logging import log_step, log_substep
+from ..config import get_ai_role_config
+from ..analysis import sanitize_filename
 
 import time
 
 logger = logging.getLogger(__name__)
+
+def manual_select_category(library: Library) -> Optional[Tuple[str, str]]:
+    """Interactive manual category selection helper."""
+    console.print(Rule("[bold cyan]Manual Categorization[/bold cyan]"))
+    
+    # 1. Main Category
+    mains = [c for c in library.categories if c.name != "Uncategorized"]
+    
+    table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE)
+    table.add_column("Key", style="cyan", width=4)
+    table.add_column("Category Name")
+    
+    opts = {}
+    for i, cat in enumerate(mains, 1):
+        opts[str(i)] = cat
+        table.add_row(str(i), cat.name)
+    
+    table.add_row("n", "[italic]New Category...[/italic]")
+    table.add_row("c", "[italic]Cancel[/italic]")
+    
+    console.print(table)
+    choice = click.prompt("Select Main Category", default="c").lower().strip()
+    
+    selected_main = None
+    selected_main_name = ""
+    
+    if choice == 'n':
+        selected_main_name = click.prompt("Enter NEW Main Category Name")
+    elif choice == 'c':
+        return None
+    elif choice in opts:
+        selected_main = opts[choice]
+        selected_main_name = selected_main.name
+    else:
+        console.print("[red]Invalid selection.[/red]")
+        return None
+
+    # 2. Sub Category
+    subs = []
+    if selected_main:
+        subs = selected_main.sub_categories
+    
+    console.print(f"\n[bold cyan]Sub-Categories for '{selected_main_name}'[/bold cyan]")
+    table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE)
+    table.add_column("Key", style="cyan", width=4)
+    table.add_column("Sub-Category Name")
+    
+    sub_opts = {}
+    for i, sub in enumerate(subs, 1):
+        sub_opts[str(i)] = sub
+        table.add_row(str(i), sub.name)
+        
+    table.add_row("n", "[italic]New Sub-Category...[/italic]")
+    table.add_row("b", "[italic]Back / Cancel[/italic]")
+    
+    console.print(table)
+    sub_choice = click.prompt("Select Sub-Category", default="n").lower().strip()
+    
+    selected_sub_name = ""
+    if sub_choice == 'n':
+        selected_sub_name = click.prompt("Enter NEW Sub-Category Name")
+    elif sub_choice == 'b':
+        return None
+    elif sub_choice in sub_opts:
+        selected_sub_name = sub_opts[sub_choice].name
+    else:
+        console.print("[red]Invalid selection.[/red]")
+        return None
+        
+    return selected_main_name, selected_sub_name
+
+def display_ai_council_config() -> None:
+    """Displays the active AI model configuration for the categorization council."""
+    log_step("AI Council Configuration")
+    console.print(Rule("[bold magenta]AI Council Configuration[/bold magenta]"))
+    
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan", expand=True)
+    table.add_column("Role", style="white bold", width=12)
+    table.add_column("Model Assigned", style="yellow")
+    table.add_column("Mission Synopsis", style="dim italic")
+
+    # Define roles to show
+    council_roles = [
+        ("MODERATOR", "Safety & Content Analysis (Flags illegal/adult content)"),
+        ("PRACTICAL", "Structural Sorting (Based on Demographics/Genres)"),
+        ("CREATIVE", "Vibe Analysis (Based on Synopsis/Themes)"),
+        ("CONSENSUS", "Final Decision Maker (Weighs all inputs)")
+    ]
+
+    for role, synopsis in council_roles:
+        config = get_ai_role_config(role)
+        provider = config.get("provider", "unknown")
+        model = config.get("model", "unknown")
+        
+        # Format model string
+        model_display = f"[{provider}] {model}"
+        
+        table.add_row(role.title(), model_display, synopsis)
+
+    console.print(table)
+    console.print("")
 
 MAX_QUEUE_SIZE = 3
 
@@ -118,6 +226,84 @@ def copy_worker(task_queue: queue.Queue, result_queue: queue.Queue, progress: Pr
         progress.update(task_id_copy, visible=False)
         task_queue.task_done()
 
+def visualize_ai_decision(results: dict, series_name: str, console_override: Optional[Console] = None):
+    """Visualizes the AI categorization decision using Rich panels."""
+    if not results: return
+    
+    printer = console_override or console
+    
+    # 0. Series Title Panel
+    printer.print(Panel(Text(series_name, justify="center", style="bold white"), style="bold blue", box=box.HEAVY))
+    
+    consensus = results.get("consensus", {})
+    final_cat = sanitize_filename(consensus.get("final_category", "Manga"))
+    final_sub = sanitize_filename(consensus.get("final_sub_category", "Other"))
+    reason = consensus.get("reason", "No reason provided.")
+    conf = consensus.get("confidence_score", 0.0)
+    
+    mod = results.get("moderation", {})
+    if not isinstance(mod, dict): mod = {"classification": "UNKNOWN"}
+    is_flagged = mod.get("classification", "SAFE") != "SAFE"
+
+    # 1. Metadata Summary
+    meta_obj = results.get("metadata")
+    meta_text = Text()
+    if meta_obj:
+        if meta_obj.genres:
+            meta_text.append("Genres: ", style="bold blue")
+            meta_text.append(", ".join(meta_obj.genres[:4]), style="dim")
+            meta_text.append(" | ")
+        if meta_obj.demographics:
+            meta_text.append("Demo: ", style="bold magenta")
+            meta_text.append(", ".join(meta_obj.demographics), style="dim")
+            meta_text.append(" | ")
+        if meta_obj.release_year:
+            meta_text.append(f"Year: {meta_obj.release_year}", style="dim")
+    
+    # 2. Synopsis
+    syn_panel = None
+    if meta_obj and meta_obj.synopsis:
+            syn = meta_obj.synopsis
+            if len(syn) > 180: syn = syn[:177] + "..."
+            syn_panel = Panel(Text(syn, style="italic"), title="Synopsis", border_style="dim", box=box.SIMPLE)
+
+    # 3. AI Council Grid
+    council_grid = Table.grid(expand=True, padding=(0, 1))
+    council_grid.add_column(ratio=1)
+    council_grid.add_column(ratio=1)
+    council_grid.add_column(ratio=1)
+    
+    def get_panel(role, data, color):
+        if not data: return Panel("N/A", title=role, border_style="dim")
+        content = ""
+        if role == "Moderator":
+            cls = data.get("classification", "?")
+            content = f"[bold]{cls}[/bold]\n"
+        elif role == "Practical" or role == "Creative":
+            cat = data.get("category", "?")
+            content = f"[bold]{cat}[/bold]\n"
+        
+        reason = data.get("reason", "")
+        if len(reason) > 80: reason = reason[:77] + "..."
+        content += f"[dim]{reason}[/dim]"
+        return Panel(content, title=role, border_style=color)
+
+    p_mod = get_panel("Moderator", results.get("moderation"), "red" if is_flagged else "green")
+    p_prac = get_panel("Practical", results.get("practical"), "blue")
+    p_crea = get_panel("Creative", results.get("creative"), "magenta")
+    
+    council_grid.add_row(p_mod, p_prac, p_crea)
+
+    # 4. Consensus
+    cons_text = f"[bold green]{final_cat}/{final_sub}[/bold green] (Conf: {conf:.2f})"
+    cons_reason = f"[dim]{reason}[/dim]"
+    cons_panel = Panel(f"{cons_text}\n{cons_reason}", title="Consensus", border_style="yellow")
+
+    printer.print(meta_text)
+    if syn_panel: printer.print(syn_panel)
+    printer.print(council_grid)
+    printer.print(cons_panel)
+
 @click.command()
 @click.argument("query", required=False)
 @click.option("--tag", multiple=True, help="Include series with this tag.")
@@ -135,6 +321,7 @@ def copy_worker(task_queue: queue.Queue, result_queue: queue.Queue, progress: Pr
 @click.option("--model-assign", is_flag=True, help="Configure AI models for specific roles before running.")
 @click.option("--newonly", is_flag=True, help="Skip series that already exist in --newroot destination.")
 @click.option("--instruct", help="Provide specific instructions/feedback to the Consensus AI (e.g., 'Force all Isekai to Fantasy').")
+@click.option("--interactive", is_flag=True, help="Enable interactive mode with manual confirmation and detailed UI.")
 def organize(
     model_assign: bool,
     newonly: bool,
@@ -152,6 +339,7 @@ def organize(
     simulate: bool,
     no_cache: bool,
     explain: bool,
+    interactive: bool,
 ) -> None:
     """
     Organize series by moving or copying them based on filters and AI suggestions.
@@ -297,138 +485,286 @@ def organize(
     fail_count = 0
     skipped_count = 0
     
-    # Initialize Queues for Background Worker
-    task_queue = queue.Queue()
-    result_queue = queue.Queue()
-    
-    # Setup Persistent Progress
-    # We use a custom layout if possible, or just standard bar
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TransferSpeedColumn(),
-        TimeRemainingColumn(),
-        console=console
-    ) as progress:
+    if interactive:
+        display_ai_council_config()
         
-        task_id_total = progress.add_task("[bold green]Overall Progress", total=len(candidates))
-        task_id_ai = progress.add_task("AI Analysis", total=None, visible=False)
-        task_id_copy = progress.add_task("Idle", total=None, visible=False)
-        
-        # Start Worker Thread if not simulation
-        worker_thread = None
-        if not simulate:
-            worker_thread = threading.Thread(
-                target=copy_worker, 
-                args=(task_queue, result_queue, progress, task_id_copy),
-                daemon=True
-            )
-            worker_thread.start()
-
-        def update_ai_status(msg: str):
-            progress.update(task_id_ai, description=f"[magenta]{msg}", visible=True)
-
-        for series in candidates:
-            # Update Main Task
-            progress.update(task_id_total, description=f"[bold green]Processing: {series.name}")
+        for i, series in enumerate(candidates, 1):
+            log_substep(f"Categorizing: {series.name}")
+            console.print(Rule(f"[bold blue][{i}/{len(candidates)}] Processing: {series.name}[/bold blue]"))
             
-            # Throttling Logic
-            if not simulate:
-                while task_queue.qsize() >= MAX_QUEUE_SIZE:
-                    update_ai_status(f"Waiting for copy queue ({task_queue.qsize()} items)...")
-                    time.sleep(0.5)
-
-            # Determine Target Path
-            final_category_path = ""
+            user_feedback = instruct
+            should_process = False
+            final_cat_path = ""
             
-            # Case A: Direct Target (e.g. "Manga/Action")
-            if target and "/" in target:
-                final_category_path = target
-                
-            # Case B: AI Assisted
-            else:
-                restrict_to = target # None or "Manga"
-                
-                # Use quiet mode if auto is enabled to prevent spinner conflict
-                use_quiet = auto 
-                
-                # If interactive (not auto), we might need to temporarily pause the progress bar?
-                # Actually, Rich's progress bar plays nice with console.print/input usually.
-                # But 'categorize.py' uses console.status which might fight.
-                # However, since we are in a loop inside `with Progress`,
-                # any `console.status` inside `suggest_category` (if not quiet) will likely just overwrite the bottom line.
-                # It's acceptable for interactive mode.
-                
-                suggestion = suggest_category(
-                    series, 
-                    library, 
-                    custom_categories=custom_schema if mode == "COPY" else None,
-                    restrict_to_main=restrict_to,
-                    quiet=use_quiet,
-                    status_callback=update_ai_status,
-                    user_feedback=instruct
-                )
-                
-                # Reset AI Task visibility
-                progress.update(task_id_ai, visible=False)
-                
-                if not suggestion or "consensus" not in suggestion:
-                    if not use_quiet:
-                        console.print(f"[red]AI failed to categorize {series.name}. Skipping.[/red]")
-                    fail_count += 1
-                    progress.advance(task_id_total)
-                    continue
+            # --- AI Logic (Interactive) ---
+            results = None 
+            
+            while True: # Interactive Loop for this series
+                try:
+                    if not results:
+                         # Define callbacks for interactive UI
+                        status_ctx = console.status(f"[bold blue]Analyzing '{series.name}'...[/bold blue]")
+                        
+                        def update_status_cb(msg: str):
+                            status_ctx.update(msg)
+
+                        def confirm_cb(suggestion: str, reason: str) -> bool:
+                            status_ctx.stop()
+                            console.print(f"\n[bold yellow]AI suggested a new category:[/bold yellow] [cyan]{suggestion}[/cyan]")
+                            console.print(f"[dim]Reason: {reason}[/dim]")
+                            res = Confirm.ask("Accept this new category?", default=True)
+                            status_ctx.start()
+                            return res
+
+                        with status_ctx:
+                            restrict_to = target
+                            results = suggest_category(
+                                series, 
+                                library, 
+                                user_feedback=user_feedback, 
+                                custom_categories=custom_schema if mode == "COPY" else None,
+                                restrict_to_main=restrict_to,
+                                status_callback=update_status_cb,
+                                confirm_callback=confirm_cb
+                            )
+                        
+                        if not results or not results.get("consensus"):
+                            console.print(f"[red]Failed to get AI consensus for {series.name}. Skipping.[/red]")
+                            break 
                     
-                cons = suggestion["consensus"]
-                final_category_path = f"{cons['final_category']}/{cons['final_sub_category']}"
+                    consensus = results["consensus"]
+                    final_cat = sanitize_filename(consensus.get("final_category", "Manga"))
+                    final_sub = sanitize_filename(consensus.get("final_sub_category", "Other"))
+                    reason = consensus.get("reason", "No reason provided.")
+                    conf = consensus.get("confidence_score", 0.0)
+                    
+                    # Moderation Check
+                    mod = results.get("moderation")
+                    if not isinstance(mod, dict):
+                        mod = {"classification": "SAFE", "reason": "Moderation data missing/invalid"}
+                    
+                    is_flagged = mod.get("classification", "SAFE") != "SAFE"
+                    is_illegal = mod.get("classification") == "ILLEGAL"
+                    
+                    # --- VISUALIZATION ---
+                    visualize_ai_decision(results, series.name)
+                    
+                    if is_illegal:
+                         console.print("[bold red]ILLEGAL CONTENT DETECTED - Skipping/Deleting[/bold red]")
+                         # Simplification: Just skip in interactive organize for now, user can choose 'c' to blacklist/delete if they want
+                         break
+
+                    # Inner Menu Loop
+                    action_taken = False
+                    while True:
+                        console.print("\n[bold]Options:[/bold]")
+                        menu_table = Table(show_header=False, box=box.SIMPLE, padding=(0, 2))
+                        menu_table.add_column("Key", style="bold cyan")
+                        menu_table.add_column("Action")
+                        menu_table.add_column("Description", style="dim")
+                        
+                        op_verb = "Copy" if mode == "COPY" else "Move"
+                        
+                        menu_table.add_row(r"[a]", "Accept", f"{op_verb} to suggestion")
+                        menu_table.add_row(r"[b]", "Reject", "Retry with instruction")
+                        menu_table.add_row(r"[e]", "Manual", "Select category manually")
+                        menu_table.add_row(r"[s]", "Skip", "Skip this series")
+                        menu_table.add_row(r"[q]", "Quit", "Exit program")
+                        console.print(menu_table)
+                        
+                        choice = click.prompt("Select action", default="a", show_default=True).lower().strip()
+                        
+                        if choice == 'a': # Accept
+                            final_cat_path = f"{final_cat}/{final_sub}"
+                            should_process = True
+                            action_taken = True
+                            break
+                        elif choice == 'b': # Reject
+                            user_feedback = click.prompt("Enter instruction")
+                            results = None 
+                            action_taken = False 
+                            break
+                        elif choice == 'e': # Manual
+                            manual = manual_select_category(library)
+                            if manual:
+                                 m_cat, m_sub = manual
+                                 final_cat_path = f"{m_cat}/{m_sub}"
+                                 should_process = True
+                                 action_taken = True
+                                 break
+                            else:
+                                 continue
+                        elif choice == 's': # Skip
+                            action_taken = True
+                            break
+                        elif choice == 'q': # Quit
+                            return
+
+                    if action_taken:
+                        break
+
+                except Exception as e:
+                    console.print(f"[red]Error: {e}[/red]")
+                    break
+            
+            # Execute
+            if should_process and final_cat_path:
+                dest_path = base_dest / final_cat_path / series.name
                 
-                # Show decision clearly in log
-                progress.console.print(f"[green]AI Selected:[/green] {final_category_path} [dim]for {series.name}[/dim]")
-                if explain:
-                     reason = cons.get("reason", "No reason provided")
-                     progress.console.print(f"  [dim]Reason: {reason}[/dim]")
+                if dest_path.resolve() == series.path.resolve():
+                    console.print(f"[dim]Skipping {series.name}: Source == Dest[/dim]")
+                    skipped_count += 1
+                    continue
 
-            # Construct full destination path
-            dest_path = base_dest / final_category_path / series.name
-            
-            # Check for same path
-            if dest_path.resolve() == series.path.resolve():
-                if not auto: console.print(f"[dim]Skipping {series.name}: Source == Dest[/dim]")
-                skipped_count += 1
-                progress.advance(task_id_total)
-                continue
-
-            if simulate:
-                console.print(f"[dim][SIMULATE] {mode} {series.name} -> {dest_path}[/dim]")
-                success_count += 1
-                progress.advance(task_id_total)
-                continue
-
-            # Queue Task
-            task = CopyTask(series=series, dest=dest_path, mode=mode)
-            task_queue.put(task)
-            
-            # Advance main progress
-            progress.advance(task_id_total)
-
-        # End of Loop: Wait for worker to finish
-        if not simulate:
-            progress.update(task_id_total, description="[bold green]Finalizing transfers...")
-            
-            # Signal stop
-            task_queue.put(None)
-            
-            # Wait for thread
-            worker_thread.join()
-            
-            # Count results
-            while not result_queue.empty():
-                if result_queue.get():
+                task = CopyTask(series=series, dest=dest_path, mode=mode)
+                
+                if simulate:
+                    console.print(f"[dim][SIMULATE] {mode} {series.name} -> {dest_path}[/dim]")
                     success_count += 1
                 else:
-                    fail_count += 1
+                    # Synchronous transfer
+                    with Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                        console=console
+                    ) as p:
+                        task_id = p.add_task(f"{mode}ing...", total=None) # indeterminate
+                        success = perform_transfer(task, p, task_id)
+                        if success: 
+                            success_count += 1
+                            console.print(f"[green]✓ {mode} Complete[/green]")
+                        else: 
+                            fail_count += 1
+                            console.print(f"[red]✗ {mode} Failed[/red]")
+
+    else:
+        # Initialize Queues for Background Worker
+        task_queue = queue.Queue()
+        result_queue = queue.Queue()
+        
+        # Setup Persistent Progress
+        # We use a custom layout if possible, or just standard bar
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            console=console
+        ) as progress:
+            
+            task_id_total = progress.add_task("[bold green]Overall Progress", total=len(candidates))
+            task_id_ai = progress.add_task("AI Analysis", total=None, visible=False)
+            task_id_copy = progress.add_task("Idle", total=None, visible=False)
+            
+            # Start Worker Thread if not simulation
+            worker_thread = None
+            if not simulate:
+                worker_thread = threading.Thread(
+                    target=copy_worker, 
+                    args=(task_queue, result_queue, progress, task_id_copy),
+                    daemon=True
+                )
+                worker_thread.start()
+
+            def update_ai_status(msg: str):
+                progress.update(task_id_ai, description=f"[magenta]{msg}", visible=True)
+
+            for series in candidates:
+                # Update Main Task
+                progress.update(task_id_total, description=f"[bold green]Processing: {series.name}")
+                
+                # Throttling Logic
+                if not simulate:
+                    while task_queue.qsize() >= MAX_QUEUE_SIZE:
+                        update_ai_status(f"Waiting for copy queue ({task_queue.qsize()} items)...")
+                        time.sleep(0.5)
+
+                # Determine Target Path
+                final_category_path = ""
+                
+                # Case A: Direct Target (e.g. "Manga/Action")
+                if target and "/" in target:
+                    final_category_path = target
+                    
+                # Case B: AI Assisted
+                else:
+                    restrict_to = target # None or "Manga"
+                    
+                    # Use quiet mode if auto is enabled to prevent spinner conflict
+                    use_quiet = auto 
+                    
+                    suggestion = suggest_category(
+                        series, 
+                        library, 
+                        custom_categories=custom_schema if mode == "COPY" else None,
+                        restrict_to_main=restrict_to,
+                        quiet=use_quiet,
+                        status_callback=update_ai_status,
+                        user_feedback=instruct
+                    )
+                    
+                    # Reset AI Task visibility
+                    progress.update(task_id_ai, visible=False)
+                    
+                    if not suggestion or "consensus" not in suggestion:
+                        if not use_quiet:
+                            console.print(f"[red]AI failed to categorize {series.name}. Skipping.[/red]")
+                        fail_count += 1
+                        progress.advance(task_id_total)
+                        continue
+                        
+                    cons = suggestion["consensus"]
+                    final_category_path = f"{cons['final_category']}/{cons['final_sub_category']}"
+                    
+                    # Visualize decision
+                    if explain:
+                         visualize_ai_decision(suggestion, series.name, console_override=progress.console)
+                    else:
+                         progress.console.print(f"[green]AI Selected:[/green] {final_category_path} [dim]for {series.name}[/dim]")
+
+                # Construct full destination path
+                dest_path = base_dest / final_category_path / series.name
+                
+                # Check for same path
+                if dest_path.resolve() == series.path.resolve():
+                    if not auto: console.print(f"[dim]Skipping {series.name}: Source == Dest[/dim]")
+                    skipped_count += 1
+                    progress.advance(task_id_total)
+                    continue
+
+                if simulate:
+                    console.print(f"[dim][SIMULATE] {mode} {series.name} -> {dest_path}[/dim]")
+                    success_count += 1
+                    progress.advance(task_id_total)
+                    continue
+
+                # Queue Task
+                task = CopyTask(series=series, dest=dest_path, mode=mode)
+                task_queue.put(task)
+                
+                # Advance main progress
+                progress.advance(task_id_total)
+
+            # End of Loop: Wait for worker to finish
+            if not simulate:
+                progress.update(task_id_total, description="[bold green]Finalizing transfers...")
+                
+                # Signal stop
+                task_queue.put(None)
+                
+                # Wait for thread
+                worker_thread.join()
+                
+                # Count results
+                while not result_queue.empty():
+                    if result_queue.get():
+                        success_count += 1
+                    else:
+                        fail_count += 1
 
     console.print(Panel(
         f"Complete!\nSuccess: {success_count}\nFailed: {fail_count}\nSkipped: {skipped_count}", 

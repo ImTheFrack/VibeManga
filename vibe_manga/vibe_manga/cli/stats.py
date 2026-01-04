@@ -140,11 +140,18 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
 
     all_target_series = get_all_series(targets, target_type)
 
+    gaps_map = {}
+    series_with_gaps = []
+
     if continuity:
         with console.status("[bold blue]Checking continuity..."):
             for s in all_target_series:
-                if not find_gaps(s):
+                gaps = find_gaps(s)
+                gaps_map[str(s.path)] = gaps
+                if not gaps:
                     complete_series += 1
+                else:
+                    series_with_gaps.append((s, gaps))
 
     if not no_metadata:
         with Progress(
@@ -377,7 +384,8 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
             if continuity:
                 cat_series = []
                 for sub in cat.sub_categories: cat_series.extend(sub.series)
-                comp = sum(1 for s in cat_series if not find_gaps(s))
+                # Use gaps_map for check
+                comp = sum(1 for s in cat_series if not gaps_map.get(str(s.path)))
                 total = len(cat_series)
                 perc = (comp / total * 100) if total > 0 else 0
                 color = "green" if perc == 100 else "yellow" if perc > 80 else "red"
@@ -404,7 +412,8 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
                 cat_gb = sub.total_size_bytes / BYTES_PER_GB
                 row = [sub.name, main.name, str(sub.total_series_count), str(sub.total_volume_count)]
                 if continuity:
-                    comp = sum(1 for s in sub.series if not find_gaps(s))
+                    # Use gaps_map
+                    comp = sum(1 for s in sub.series if not gaps_map.get(str(s.path)))
                     total = len(sub.series)
                     perc = (comp / total * 100) if total > 0 else 0
                     color = "green" if perc == 100 else "yellow" if perc > 80 else "red"
@@ -431,7 +440,7 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
                 s_mb = series.total_size_bytes / BYTES_PER_MB
                 row = [series.name, f"{parent_name} > {sub.name}", str(series.total_volume_count)]
                 if continuity:
-                    gaps = find_gaps(series)
+                    gaps = gaps_map.get(str(series.path))
                     row.append("[green]✓[/green]" if not gaps else "[red]✗[/red]")
                 if deep:
                     row.append(f"{series.total_page_count:,}")
@@ -466,7 +475,7 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
                 vol_mb = sum(v.size_bytes for v in series.volumes) / BYTES_PER_MB
                 row = [f"{len(series.volumes)} Volumes", "Files"]
                 if continuity:
-                     gaps = find_gaps(series)
+                     gaps = gaps_map.get(str(series.path))
                      row.append("[green]✓[/green]" if not gaps else "[red]✗[/red]")
                 if deep:
                     row.append(f"{series.total_page_count:,}")
@@ -512,6 +521,26 @@ def stats(query: Optional[str], continuity: bool, deep: bool, verify: bool, no_c
 
     console.print(final_layout)
     
+    # Continuity Report
+    if continuity and series_with_gaps:
+        console.print("")
+        report_lines = []
+        report_lines.append(f"[bold red]Continuity Issues Found ({len(series_with_gaps)} series)[/bold red]")
+        report_lines.append("")
+        
+        # Limit report size if massive? No, user wants a list.
+        for s, gaps in series_with_gaps:
+             report_lines.append(f"[yellow]{s.name}[/yellow]:")
+             for gap in gaps:
+                 report_lines.append(f"  • {gap}")
+        
+        console.print(Panel(
+            "\n".join(report_lines),
+            title="[red]Continuity Report[/red]",
+            border_style="red",
+            padding=(1, 2)
+        ))
+
     # Verification Report (if --verify was used)
     if verify:
         if total_corrupt_volumes > 0:
