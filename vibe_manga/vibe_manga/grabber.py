@@ -32,7 +32,7 @@ from .constants import (
     SERIES_ALIASES
 )
 from .indexer import LibraryIndex
-from .logging import get_logger, log_substep, temporary_log_level, console
+from .logging import get_logger, log_substep, temporary_log_level, console, log_step
 from .cache import load_library_state, save_library_cache
 from .matcher import consolidate_entries, parse_entry
 from .metadata import fetch_from_jikan
@@ -139,7 +139,7 @@ def generate_search_candidates(text: str) -> List[str]:
             for sub_sep in [":", "꞉", "!", " - "]:
                 if sub_sep in clean:
                     candidates.extend([p.strip() for p in clean.split(sub_sep) if p.strip()])
-
+    
     # Dedup and clean
     return sorted(list(set(c for c in candidates if c.strip())), key=len, reverse=True)
 
@@ -805,25 +805,31 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
     """
     qbit = QBitAPI()
     
-    logger.info("Pulling Completed Torrents")
+    logger.info("Pulling Completed Torrents...")
+    console.print(Rule("[bold blue]Pulling Completed VibeManga Torrents[/bold blue]"))
+    console.print(f"Using Library Root: [cyan]{root_path}[/cyan]")
+    console.print(f"Using Match Results File: [cyan]{input_file}[/cyan]")
+    console.print(f"Using qBittorrent file root: [cyan]{QBIT_DOWNLOAD_ROOT}[/cyan]")
+ 
     if simulate:
         logger.warning("SIMULATION MODE ACTIVE - No changes will be made.")
     
     if not QBIT_DOWNLOAD_ROOT:
         logger.warning("QBIT_DOWNLOAD_ROOT is not set in .env. Please set it to your local download path.")
 
-    # Load match results
-    match_data = []
-    if input_file and os.path.exists(input_file):
-        try:
-            with open(input_file, 'r', encoding='utf-8') as f:
-                match_data = json.load(f)
-        except Exception as e:
-            logger.error(f"Could not load match results from {input_file}: {e}")
+    with console.status("[bold blue]Loading match results..."):
+        # Load match results
+        match_data = []
+        if input_file and os.path.exists(input_file):
+            try:
+                with open(input_file, 'r', encoding='utf-8') as f:
+                    match_data = json.load(f)
+            except Exception as e:
+                logger.error(f"Could not load match results from {input_file}: {e}")
 
     # Use status for connecting as it's a blocking op
-    with console.status("[bold blue]Connecting to qBittorrent..."):
-        torrents = qbit.get_torrents_info(tag=QBIT_DEFAULT_TAG)
+    log_substep("[bold blue]Connecting to qBittorrent...")
+    torrents = qbit.get_torrents_info(tag=QBIT_DEFAULT_TAG)
     
     if not torrents:
         logger.warning("No VibeManga torrents found in qBittorrent.")
@@ -897,17 +903,19 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
     if not simulate and not pause:
         pass
 
-    if not click.confirm(f"Proceed with post-processing {len(completed)} completed torrents?"):
+    console.print(f"\n[bold green]Found [bold white]{len(completed)}[/bold white] completed torrent(s) ready for post-processing.[/bold green]")
+    if not click.confirm(f"Proceed with post-processing?"):
         console.print("[yellow]Operation cancelled.[/yellow]")
         return
 
     for i, t in enumerate(completed):
         display_name = t["_display_name"]
         logger.info(f"Processing [{i+1}/{len(completed)}]: {t['_sort_name']}")
-        
+
         # Step 1: Stop Torrent
         if simulate:
             logger.info("[SIMULATE] Stopping torrent...")
+            logger.info("[SIMULATE] Torrent stopped")
         else:
             if qbit.pause_torrents([t["hash"]]):
                 log_substep("Torrent stopped")
@@ -957,7 +965,7 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
         # Log a summary of what was found
         total_v = len(set(n for item in transfer_plan for n in item['v']))
         total_c = len(set(n for item in transfer_plan for n in item['c'] + item['u']))
-        logger.info(f"Torrent contains: [bold cyan]{total_v} volumes[/bold cyan] and [bold cyan]{total_c} chapters/units[/bold cyan]")
+        console.print(Panel(f"[bold magenta]Processing Torrent: [/bold magenta][bold white]{display_name}[/bold white]\n[dim white]{t['name']}[/dim white]\n[bold cyan]Found Content: [/bold cyan][bold white]{total_v} volumes[/bold white] and [bold white]{total_c} chapters/units[/bold white]", title="Torrent Analysis Summary", subtitle_align="right"))
 
         # Step 4: Analyze (Filter Plan)
         local_series = None
@@ -1039,11 +1047,12 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                 msg = "Fills Gaps:"
                 if new_v: msg += f" [bold green]Vols: {format_ranges(new_v)}[/bold green]"
                 if new_c: msg += f" [bold green]Chaps: {format_ranges(new_c)}[/bold green]"
-                logger.info(msg)
+                console.print(msg)
                 log_substep(f"Fills Gaps: Vols: {format_ranges(new_v)} | Chaps: {format_ranges(new_c)}")
             else:
                 logger.info("All pulled content already exists in library (Potential Upgrade/Duplicate).")
-                
+                console.print("[yellow]All pulled content already exists in library (Potential Upgrade/Duplicate).[/yellow]")
+
             skipped_count = 0
             for item in transfer_plan:
                 is_redundant = True
@@ -1062,7 +1071,9 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                     
             if skipped_count > 0:
                 log_substep(f"Marking {skipped_count} redundant files to skip copying.")
+                console.print(f"[dim]Marking {skipped_count} redundant files to skip copying.[/dim]")
         else:
+            console.print("[yellow]No matching series found in library. Treating as new series.[/yellow]")
             log_substep("NEW SERIES: No match found in library. All files will be copied.")
 
         # Step 5: Stage (Copy)
@@ -1248,7 +1259,7 @@ def process_pull(simulate: bool = False, pause: bool = False, root_path: str = "
                         
                         if imported_count > 0:
                             logger.info(f"Successfully imported {imported_count} files into [bold green]{target_dir}[/bold green]")
-                            log_substep(f"Successfully imported {imported_count} files.")
+                            console.print(f"Successfully imported {imported_count} files.")
                 else:
                     logger.info("No files to import.")
 
