@@ -80,6 +80,14 @@ BYTES_PER_KB = 1024
 BYTES_PER_MB = 1024 * 1024
 BYTES_PER_GB = 1024 * 1024 * 1024
 
+# Series Aliases for Matching
+SERIES_ALIASES = {
+    "100 Girlfriends Who Really, Really, Really, Really, Really Love You, The": [
+        "Hyakkano",
+        "The 100 Girlfriends Who Really Really Really Really REALLY Love You",
+    ],
+}
+
 # Progress Display
 PROGRESS_REFRESH_RATE = 10  # Refresh per second for progress bars
 DEEP_ANALYSIS_REFRESH_RATE = 5  # Refresh per second for deep analysis

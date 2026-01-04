@@ -83,7 +83,7 @@ def pullcomplete(ctx, input_file: str, verbose: int) -> None:
         run_scan_with_progress(root, "[bold green]Refreshing Cache...[/bold green]", use_cache=False)
     
     # 3. Metadata
-    run_step("Step 3/6: Updating Metadata", metadata, query=None, force_update=False, trust_jikan=False, process_all=True, model_assign=False)
+    run_step("Step 3/6: Updating Metadata", metadata, query=None, force_update=False, trust_jikan=False, process_all=True, model_assign=False, verbose=verbose)
     
     # 4. Categorize
     run_step("Step 4/6: Auto-Categorizing", categorize, query=None, auto=True, simulate=False, no_cache=True, model_assign=False, pause=False)
@@ -112,11 +112,11 @@ def pullcomplete(ctx, input_file: str, verbose: int) -> None:
                 
                 # b. Match
                 if verbose == 0: console.print("[dim]Running Match...[/dim]")
-                ctx.invoke(match, query=None, input_file=NYAA_DEFAULT_OUTPUT_FILENAME, output_file=input_file, table=False, show_all=False, no_cache=True, stats=False, no_parallel=False)
+                ctx.invoke(match, query=None, input_file=NYAA_DEFAULT_OUTPUT_FILENAME, output_file=input_file, table=False, show_all=False, no_cache=True)
                 
                 # c. Grab
                 if verbose == 0: console.print(f"[dim]Running Grab (Auto-Add Max {needed})...[/dim]")
-                ctx.invoke(grab, name=None, input_file=input_file, status=False, auto_add=False, auto_add_only=True, max_downloads=needed)
+                ctx.invoke(grab, name=None, input_file=input_file, status=False, auto_add=False, auto_add_only=True)
                 
             else:
                 console.print(f"[yellow]Queue is full ({count} >= {LIMIT}). Skipping replenishment.[/yellow]")

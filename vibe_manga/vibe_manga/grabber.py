@@ -28,7 +28,8 @@ from .constants import (
     BYTES_PER_GB,
     PROGRESS_REFRESH_RATE,
     PULL_TEMPDIR,
-    FUZZY_MATCH_THRESHOLD
+    FUZZY_MATCH_THRESHOLD,
+    SERIES_ALIASES
 )
 from .indexer import LibraryIndex
 from .logging import get_logger, log_substep, temporary_log_level, console
@@ -67,19 +68,32 @@ def find_series_match(text: str, library: Library) -> Optional[Series]:
     index = _index_cache[lib_id]
     candidates = generate_search_candidates(text)
     
+    logger.debug(f"Searching for '{text}' with candidates: {candidates}")
+    
+    # 1. Exact/Synonym Search (Now includes SERIES_ALIASES via LibraryIndex)
     for cand in candidates:
         matches = index.search(cand)
         if matches:
+            logger.debug(f"Found exact/synonym match: {matches[0].name} for candidate: {cand}")
             return matches[0]
             
-    # Fuzzy fallback
+    # 2. Fuzzy fallback - try ALL candidates
+    thresh = FUZZY_MATCH_THRESHOLD / 100.0 if FUZZY_MATCH_THRESHOLD > 1.0 else FUZZY_MATCH_THRESHOLD
     for cand in candidates:
-        # Use project-wide threshold (LibraryIndex expects 0.0-1.0 float)
-        thresh = FUZZY_MATCH_THRESHOLD / 100.0 if FUZZY_MATCH_THRESHOLD > 1.0 else FUZZY_MATCH_THRESHOLD
         matches = index.fuzzy_search(cand, threshold=thresh)
         if matches:
+            logger.debug(f"Found fuzzy match: {matches[0].name} for candidate: {cand}")
             return matches[0]
             
+        # Try with normalized punctuation
+        normalized_cand = re.sub(r'[,\'꞉:]', '', cand).lower()
+        if normalized_cand != cand.lower():
+            matches = index.fuzzy_search(normalized_cand, threshold=thresh - 0.05)
+            if matches:
+                logger.debug(f"Found fuzzy match (punc-normalized): {matches[0].name} for candidate: {cand}")
+                return matches[0]
+            
+    logger.warning(f"No match found for '{text}' - candidates tried: {candidates}")
     return None
 
 def generate_search_candidates(text: str) -> List[str]:
@@ -90,14 +104,10 @@ def generate_search_candidates(text: str) -> List[str]:
     raw_pieces = [text]
     
     # Split original text by common separators BEFORE stripping
-    if "|" in text:
-        raw_pieces.extend([p.strip() for p in text.split("|")])
-    if "｜" in text:
-        raw_pieces.extend([p.strip() for p in text.split("｜")])
-    if " / " in text:
-        raw_pieces.extend([p.strip() for p in text.split("/")])
-    if " - " in text:
-        raw_pieces.extend([p.strip() for p in text.split(" - ")])
+    # Split by common separators (BEFORE stripping)
+    for sep in ["|", "｜", " / ", " - "]:
+        if sep in text:
+            raw_pieces.extend([p.strip() for p in text.split(sep.strip()) if p.strip()])
     
     candidates = []
     
@@ -108,6 +118,9 @@ def generate_search_candidates(text: str) -> List[str]:
         content = b[0] or b[1]
         if content and len(content) > 3: # Ignore short tags
             candidates.append(content.strip())
+            # Also try without "The" prefix if it exists
+            if content.lower().startswith("the "):
+                candidates.append(content[4:].strip())
 
     # Process all pieces through strip_volume_info
     for piece in raw_pieces:
@@ -115,19 +128,18 @@ def generate_search_candidates(text: str) -> List[str]:
         if clean:
             candidates.append(clean)
             
-            # Sub-split the cleaned version too, just in case
-            if ":" in clean:
-                candidates.extend([p.strip() for p in clean.split(":")])
-            if "!" in clean:
-                candidates.extend([p.strip() for p in clean.split("!")])
+            # Add "The" variations
+            if clean.lower().startswith("the "):
+                candidates.append(clean[4:].strip())
+            elif not clean.lower().startswith("the") and " the " not in clean.lower():
+                # Only add "The " prefix if it doesn't seem to have one and isn't a skip word
+                candidates.append(f"The {clean}")
 
-    # 'The' handling
-    extra = []
-    for c in candidates:
-        if c.lower().startswith("the "):
-            extra.append(c[4:].strip())
-    candidates.extend(extra)
-            
+            # Sub-split the cleaned version too, just in case
+            for sub_sep in [":", "꞉", "!", " - "]:
+                if sub_sep in clean:
+                    candidates.extend([p.strip() for p in clean.split(sub_sep) if p.strip()])
+
     # Dedup and clean
     return sorted(list(set(c for c in candidates if c.strip())), key=len, reverse=True)
 

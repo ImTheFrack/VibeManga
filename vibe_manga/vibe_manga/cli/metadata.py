@@ -36,11 +36,24 @@ logger = get_logger(__name__)
 @click.option("--all", "process_all", is_flag=True, help="Process all series in the library.")
 @click.option("--model-assign", is_flag=True, help="Configure AI models for specific roles before running.")
 @click.option("--parallel", type=click.IntRange(1, 10), default=1, help="Number of parallel threads to use (Default: 1).")
-def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, process_all: bool, model_assign: bool, parallel: int) -> None:
+@click.option("-v", "--verbose", count=True, help="Increase verbosity (-v: INFO, -vv: DEBUG).")
+
+def metadata(query: Optional[str], force_update: bool, trust_jikan: bool, process_all: bool, model_assign: bool, parallel: int, verbose: int) -> None:
     """
     Fetches and saves metadata (genres, authors, status) for series.
     Creates a 'series.json' file in each series directory.
     """
+    
+    # Set global verbosity based on flag
+    log_level = logging.WARNING
+    clean_logs = False
+    if verbose == 1:
+        log_level = logging.INFO
+        clean_logs = True
+    elif verbose >= 2:
+        log_level = logging.DEBUG
+        clean_logs = False
+
     if model_assign:
         run_model_assignment()
         if not query and not process_all:

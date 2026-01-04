@@ -179,12 +179,24 @@ def check_newroot_structure(newroot: Path) -> Tuple[bool, List[str]]:
 @click.option("--model-assign", is_flag=True, help="Configure AI models for specific roles before running.")
 @click.option("--pause", is_flag=True, help="Pause before each categorization decision.")
 @click.option("--newroot", type=click.Path(), help="Target a NEW root directory. Copies files instead of moving. Detects schema from target.")
-def categorize(query: Optional[str], auto: bool, simulate: bool, no_cache: bool, model_assign: bool, pause: bool, newroot: Optional[str]) -> None:
+@click.option("-v", "--verbose", count=True, help="Increase verbosity (-v: INFO, -vv: DEBUG).")
+
+def categorize(query: Optional[str], auto: bool, simulate: bool, no_cache: bool, model_assign: bool, pause: bool, newroot: Optional[str], verbose: int) -> None:
     """
     Automatically sorts series.
     Default: Moves 'Uncategorized' series into the library structure.
     With --newroot: Copies ALL series to the new root, adapting to its schema.
     """
+    # Set global verbosity based on flag
+    log_level = logging.WARNING
+    clean_logs = False
+    if verbose == 1:
+        log_level = logging.INFO
+        clean_logs = True
+    elif verbose >= 2:
+        log_level = logging.DEBUG
+        clean_logs = False
+    
     if model_assign:
         run_model_assignment()
         

@@ -175,32 +175,14 @@ def match_single_entry(entry: Dict[str, Any], library_index: Optional[LibraryInd
     
     # Strategy 3: Fuzzy Match (Fallback)
     if not best_series:
-        # We need to fuzzy match against ALL identities in the index
-        # Since LibraryIndex.title_map keys are normalized titles, we can iterate those.
-        
-        best_ratio = 0.0
+        # Use optimized fuzzy search from LibraryIndex
+        thresh = c.FUZZY_MATCH_THRESHOLD / 100.0 if c.FUZZY_MATCH_THRESHOLD > 1.0 else c.FUZZY_MATCH_THRESHOLD
         
         for name in parsed.get("parsed_name", []):
-            norm_name = semantic_normalize(name)
-            if not norm_name: continue
-            
-            for indexed_norm_title, series_list in library_index.title_map.items():
-                ratio = difflib.SequenceMatcher(None, norm_name, indexed_norm_title).ratio() * 100
-                
-                if ratio > best_ratio:
-                    # Enforce number consistency for high-confidence fuzzy matches
-                    if ratio >= c.FUZZY_MATCH_THRESHOLD:
-                        # Extract numbers from the ALREADY normalized strings
-                        nums_a = re.findall(r'\d+', norm_name)
-                        nums_b = re.findall(r'\d+', indexed_norm_title)
-                        if nums_a != nums_b:
-                            continue
-
-                    best_ratio = ratio
-                    if ratio >= c.FUZZY_MATCH_THRESHOLD:
-                        best_series = series_list[0] # Pick first if multiple
-                        
-        # If best_ratio was updated but below threshold, best_series remains None
+            matches = library_index.fuzzy_search(name, threshold=thresh)
+            if matches:
+                best_series = matches[0]
+                break
 
     if best_series:
         parsed["matched_name"] = best_series.name
@@ -477,11 +459,13 @@ def parse_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     clean_title = re.sub(r"\s+", " ", clean_title)
     
     # 7. Handle Multiple Names
-    if "|" in clean_title or "｜" in clean_title:
-        # Support both standard and full-width pipes as delimiters
-        s_char = "|" if "|" in clean_title else "｜"
-        parts = [p.strip() for p in clean_title.split(s_char)]
-        parsed_names = [p for p in parts if p]
+    if any(sep in clean_title for sep in ["|", "｜", " / ", " - "]):
+        # Support common delimiters
+        parts = []
+        # We use a regex to split by any of these while preserving the rest
+        # This is safer than nested splits
+        split_parts = re.split(r"\||｜| / | - ", clean_title)
+        parsed_names = [p.strip() for p in split_parts if p.strip()]
         
         # Keep the original full title as well to match combined library entries
         # (e.g. if library has "JP | EN" as a single folder name)

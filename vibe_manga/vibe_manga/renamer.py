@@ -43,6 +43,7 @@ def add_to_whitelist(series_name: str) -> None:
 class FileRenameOp:
     original_path: Path
     new_rel_path: str  # Relative to the NEW series root
+    reasons: List[str] = field(default_factory=list)
     
     def get_target_path(self, series_root: Path) -> Path:
         return series_root / self.new_rel_path
@@ -175,16 +176,83 @@ def generate_rename_op_for_series(
         # Determine target subfolder
         target_sub = ""
         if use_subfolders:
-            if v: target_sub = vol_folder
-            elif c or u: target_sub = chap_folder
+            if v: 
+                target_sub = vol_folder
+            else:
+                # Force ANY remaining files (chapters, units, or orphans) into the chap/extras folder
+                target_sub = chap_folder
         
         new_rel_path = Path(target_sub) / new_filename
         
         # Check if changed (path or name)
         try:
             current_rel = path.relative_to(series.path)
-            if str(current_rel) != str(new_rel_path):
-                file_ops.append(FileRenameOp(path, str(new_rel_path)))
+            
+            # Check for structural issues (files in root when subfolders exist, or wrong subfolders)
+            is_wrong_structure = False
+            if use_subfolders:
+                if current_rel.parent == Path("."):
+                    is_wrong_structure = True
+                elif current_rel.parent not in [Path(vol_folder), Path(chap_folder)]:
+                    is_wrong_structure = True
+            
+            if current_rel != new_rel_path or str(current_rel) != str(new_rel_path) or is_wrong_structure:
+                import unicodedata
+                reasons = []
+                
+                # 1. Check Extension (Type or Case)
+                if path.suffix != new_ext:
+                    if path.suffix.lower() == new_ext.lower():
+                        reasons.append("Case")
+                    else:
+                        reasons.append("Ext")
+                
+                # 2. Check Path/Movement
+                if current_rel.parent != Path(target_sub):
+                    if is_wrong_structure:
+                        reasons.append("Organize")
+                    else:
+                        reasons.append("Move")
+                    
+                # 3. Check Stem (Name/Case/Space/Unicode)
+                if path.stem != new_fname_stem:
+                    if "Case" in reasons: pass
+                    elif path.stem.lower() == new_fname_stem.lower():
+                        reasons.append("Case")
+                    elif path.stem.strip() == new_fname_stem.strip():
+                        reasons.append("Space")
+                    elif unicodedata.normalize('NFC', path.stem) == unicodedata.normalize('NFC', new_fname_stem):
+                        reasons.append("Unicode")
+                    elif re.sub(r'\s+', ' ', path.stem) == re.sub(r'\s+', ' ', new_fname_stem):
+                        reasons.append("Space")
+                    else:
+                        reasons.append("Name")
+
+                # 4. Check Collision (Before finishing Op)
+                target_full_path = (series.path.parent / target_name) / new_rel_path
+                if target_full_path.exists() and not target_full_path.samefile(path):
+                    reasons.append("Conflict")
+
+                # 5. Check Full Name if still empty
+                if not reasons and path.name != new_filename:
+                    if path.name.lower() == new_filename.lower():
+                        reasons.append("Case")
+                    else:
+                        reasons.append("Name")
+
+                # 6. Fallback
+                if not reasons:
+                    curr_str = str(current_rel).replace('\\', '/')
+                    new_str = str(new_rel_path).replace('\\', '/')
+                    if curr_str != new_str:
+                        if curr_str.lower() == new_str.lower():
+                            reasons.append("PathCase")
+                        else:
+                            reasons.append("Path")
+                    else:
+                        reasons.append("Misc")
+
+                file_ops.append(FileRenameOp(path, str(new_rel_path), reasons))
         except ValueError:
             continue
 
@@ -292,9 +360,33 @@ def execute_rename_op(op: SeriesRenameOp) -> List[str]:
                 logger.warning(f"Source file not found at expected path, skipping: {current_file_path}")
                 continue
 
-            # Ensure parent directory exists for renames that move files into subfolders
+            # Ensure parent directory exists and has correct casing
             if not target_file_path.parent.exists():
                 target_file_path.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                # Check for case-only mismatch in parent folders
+                # We need to walk up from the file to the series root
+                curr_p = target_file_path.parent
+                try:
+                    rel_to_root = curr_p.relative_to(final_series_path)
+                    parts = rel_to_root.parts
+                    check_path = final_series_path
+                    for part in parts:
+                        next_path = check_path / part
+                        # Find what's actually on disk
+                        try:
+                            actual_name = next(p for p in check_path.iterdir() if p.name.lower() == part.lower()).name
+                            if actual_name != part:
+                                # Case mismatch on disk! Rename the folder.
+                                actual_path = check_path / actual_name
+                                temp_folder = check_path / f"{actual_name}_TEMP_{os.getpid()}"
+                                actual_path.rename(temp_folder)
+                                temp_folder.rename(next_path)
+                        except (StopIteration, OSError):
+                            pass
+                        check_path = next_path
+                except ValueError:
+                    pass
 
             if target_file_path.exists():
                 is_same_file = False

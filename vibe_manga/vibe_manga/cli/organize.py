@@ -222,8 +222,10 @@ def organize(
     query_matches: Optional[Set[str]] = None
     if query:
         query_results = index.search(query)
-        # LibraryIndex.search returns list of dicts with 'series' object
-        query_matches = {r['series'].path for r in query_results}
+        # LibraryIndex.search() returns Series objects directly.
+        #query_matches = {r['series'].path for r in query_results}
+        query_matches = {r.path for r in query_results}
+        
         if not query_matches:
             console.print(f"[yellow]No series found matching query '{query}'[/yellow]")
             return

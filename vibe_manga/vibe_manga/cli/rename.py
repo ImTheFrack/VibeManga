@@ -5,6 +5,7 @@ Standardizes folder and file names based on metadata.
 """
 import click
 import logging
+from pathlib import Path
 from typing import Optional, List
 from rich.table import Table
 from rich import box
@@ -139,6 +140,20 @@ def run_interactive_rename_selection(plan: List, prefer_english: bool = False, p
                 detail_grid.add_row("Path:", f"[dim]{path_str}[/dim]")
                 detail_grid.add_row("Genres:", f"[green]{genres}[/green]")
                 detail_grid.add_row("Tags:", f"[blue]{tags}[/blue]")
+                
+                # File Ops Summary
+                if current_op.file_ops:
+                    all_reasons = set()
+                    for f_op in current_op.file_ops:
+                        all_reasons.update(f_op.reasons)
+                    reason_str = f" ({', '.join(sorted(all_reasons))})" if all_reasons else ""
+                    detail_grid.add_row("File Ops:", f"{len(current_op.file_ops)} pending{reason_str}")
+                    
+                    # Show first 2 file ops as example
+                    for f_op in current_op.file_ops[:2]:
+                        f_reason = f" ({', '.join(f_op.reasons)})" if f_op.reasons else ""
+                        detail_grid.add_row("", f"[dim]{f_op.original_path.name} -> {Path(f_op.new_rel_path).name}{f_reason}[/dim]")
+                
                 detail_grid.add_row("Synopsis:", f"[italic]{synopsis}[/italic]")
                 
                 detail_content = detail_grid
@@ -274,7 +289,8 @@ def run_interactive_rename_selection(plan: List, prefer_english: bool = False, p
 @click.option("--force", is_flag=True, help="Overwrite destinations (dangerous).")
 @click.option("--level", type=click.IntRange(1, 3), default=3, help="Safety Level (1=Trivial, 2=Safe/Fuzzy, 3=Aggressive). Default: 3")
 @click.option("--interactive", is_flag=True, help="Interactively select items to rename.")
-def rename(query: Optional[str], english: bool, japanese: bool, auto: bool, simulate: bool, force: bool, level: int, interactive: bool) -> None:
+@click.option("--verbose", is_flag=True, help="Show detailed file-level rename reasons.")
+def rename(query: Optional[str], english: bool, japanese: bool, auto: bool, simulate: bool, force: bool, level: int, interactive: bool, verbose: bool) -> None:
     """
     Standardizes folder and file names based on metadata.
     Renames the series folder to match the canonical title.
@@ -326,7 +342,14 @@ def rename(query: Optional[str], english: bool, japanese: bool, auto: bool, simu
 
         for op in plan:
             file_count = len(op.file_ops)
-            f_txt = f"{file_count} files" if file_count > 0 else "-"
+            
+            # Aggregate reasons
+            all_reasons = set()
+            for f_op in op.file_ops:
+                all_reasons.update(f_op.reasons)
+            
+            reason_str = f" [dim]({', '.join(sorted(all_reasons))})[/dim]" if all_reasons else ""
+            f_txt = f"{file_count} files{reason_str}" if file_count > 0 else "-"
             
             # Color code level
             lvl_color = "green" if op.safety_level == 1 else "yellow" if op.safety_level == 2 else "red"
@@ -338,6 +361,48 @@ def rename(query: Optional[str], english: bool, japanese: bool, auto: bool, simu
                 f_txt, 
                 str(op.current_path)
             )
+
+            if verbose and op.file_ops:
+                for f_op in op.file_ops:
+                    formatted_reasons = []
+                    for r in f_op.reasons:
+                        if r == "Conflict":
+                            formatted_reasons.append("[bold red]Conflict[/bold red]")
+                        elif r == "Organize":
+                            formatted_reasons.append("[cyan]Organize[/cyan]")
+                        else:
+                            formatted_reasons.append(r)
+                            
+                    f_reason = f" [dim]({', '.join(formatted_reasons)})[/dim]" if f_op.reasons else ""
+                    
+                    # If it's a subtle change, use repr()
+                    subtle = any(r in f_op.reasons for r in ["Space", "Unicode", "Misc", "Path", "PathCase"])
+                    
+                    # Show full path for movement/structure
+                    show_full = any(r in f_op.reasons for r in ["Path", "PathCase", "Move", "Organize"])
+                    
+                    if show_full:
+                        try:
+                            curr_rel = f_op.original_path.relative_to(op.current_path)
+                            curr_display = str(curr_rel)
+                        except ValueError:
+                            curr_display = f_op.original_path.name
+                        target_display = f_op.new_rel_path
+                    else:
+                        curr_display = f_op.original_path.name
+                        target_display = Path(f_op.new_rel_path).name
+
+                    if subtle:
+                        curr_display = repr(curr_display)
+                        target_display = repr(target_display)
+
+                    table.add_row(
+                        "",
+                        f"  [dim]L {curr_display}[/dim]",
+                        f"  [dim]-> {target_display}{f_reason}[/dim]",
+                        "",
+                        ""
+                    )
 
         console.print(table)
         

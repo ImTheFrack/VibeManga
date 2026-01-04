@@ -1,10 +1,13 @@
 import logging
+import difflib
+import re
 from typing import Dict, List, Optional, Union, Any
 from dataclasses import dataclass
 from collections import defaultdict
 
 from .models import Library, Series
 from .analysis import semantic_normalize
+from .constants import SERIES_ALIASES
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +103,12 @@ class LibraryIndex:
             self.mal_id_map[series.metadata.mal_id] = series
 
         # Index by Identities (Title, Synonyms, Folder Name)
-        for name in series.identities:
+        # Combine folder identity with global aliases
+        identities = list(series.identities)
+        if series.name in SERIES_ALIASES:
+            identities.extend(SERIES_ALIASES[series.name])
+
+        for name in identities:
             norm = semantic_normalize(name)
             if not norm:
                 continue
@@ -141,8 +149,6 @@ class LibraryIndex:
         best_ratio = 0.0
         
         # Iterate unique keys (much faster than iterating all series objects)
-        import difflib, re
-        
         for indexed_title in self.title_map.keys():
             ratio = difflib.SequenceMatcher(None, norm_query, indexed_title).ratio()
             
