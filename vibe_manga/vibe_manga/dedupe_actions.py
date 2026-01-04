@@ -17,7 +17,7 @@ from rich.console import Group
 from .models import Series, Volume
 from .dedupe_resolver import ResolutionPlan, ResolutionAction
 from .logging import console
-from .analysis import sanitize_filename
+from .analysis import sanitize_filename, classify_unit
 
 logger = logging.getLogger(__name__)
 
@@ -222,13 +222,157 @@ class ActionExecutor:
         
         return result
     
+    def _get_series_name_from_path(self, series_path: Path) -> str:
+        """Extract series name from path."""
+        return series_path.name
+    
+    def _detect_series_naming_pattern(self, series_path: Path) -> tuple[str, str, Optional[Path]]:
+        """
+        Detect the naming pattern of a series.
+        
+        Returns:
+            Tuple of (base_name, unit_format, subgroup_path)
+            - base_name: The series name (e.g., "One Piece")
+            - unit_format: Format string for units (e.g., "v{:02d}", "c{}")
+            - subgroup_path: Path to appropriate subgroup, or None for root
+        """
+        # Get series name from path
+        base_name = self._get_series_name_from_path(series_path)
+        
+        # Default values
+        unit_format = "v{}"  # Default
+        subgroup_path = None
+        
+        # If path doesn't exist, return defaults
+        if not series_path.exists():
+            return base_name, unit_format, subgroup_path
+        
+        # Look for existing files to detect pattern
+        existing_files = []
+        for item in series_path.iterdir():
+            if item.is_file() and item.suffix.lower() in ['.cbz', '.cbr', '.zip', '.rar']:
+                existing_files.append(item.name)
+        
+        # If no files in root, check subgroups
+        if not existing_files:
+            for item in series_path.iterdir():
+                if item.is_dir() and item.name not in ['.git', '__pycache__', 'series.json']:
+                    # Check if this subgroup has files
+                    subgroup_files = []
+                    for subitem in item.iterdir():
+                        if subitem.is_file() and subitem.suffix.lower() in ['.cbz', '.cbr', '.zip', '.rar']:
+                            subgroup_files.append(subitem.name)
+                    
+                    if subgroup_files:
+                        existing_files = subgroup_files
+                        subgroup_path = item
+                        break
+        
+        # Analyze existing files to detect pattern
+        if existing_files:
+            sample_file = existing_files[0]
+            
+            # Try to extract unit format from sample
+            import re
+            
+            # Look for volume pattern: v01, v02, etc.
+            vol_match = re.search(r'v(\d+)', sample_file, re.IGNORECASE)
+            if vol_match:
+            # Check if it uses leading zeros
+                num = vol_match.group(1)
+                if len(num) > 1 and num[0] == '0':
+                    unit_format = f"v{{:0{len(num)}d}}"
+                else:
+                    unit_format = "v{}"
+            else:
+                # Look for chapter pattern: c001, c123, etc.
+                chap_match = re.search(r'c(\d+)', sample_file, re.IGNORECASE)
+                if chap_match:
+                    num = chap_match.group(1)
+                    if len(num) > 1 and num[0] == '0':
+                        unit_format = f"c{{:0{len(num)}d}}"
+                    else:
+                        unit_format = "c{}"
+                else:
+                    # Look for unit pattern: unit001, etc.
+                    unit_match = re.search(r'unit(\d+)', sample_file, re.IGNORECASE)
+                    if unit_match:
+                        num = unit_match.group(1)
+                        if len(num) > 1 and num[0] == '0':
+                            unit_format = f"unit{{:0{len(num)}d}}"
+                        else:
+                            unit_format = "unit{}"
+        
+        return base_name, unit_format, subgroup_path
+    
+    def _generate_target_filename(self, source_file: Path, target_base_name: str, target_unit_format: str) -> str:
+        """
+        Generate target filename based on source file and target series pattern.
+        
+        Args:
+            source_file: Source file path
+            target_base_name: Target series base name
+            target_unit_format: Target series unit format string
+            
+        Returns:
+            Target filename
+        """
+        # Extract unit numbers from source filename
+        v, c, u = classify_unit(source_file.name)
+        units = v or c or u
+        
+        if not units:
+            # No unit numbers found, use original name
+            logger.warning(f"Could not extract unit numbers from {source_file.name}, using original name")
+            return source_file.name
+        
+        # Use the first unit number
+        unit_num = units[0]
+        
+        # Format the unit number according to target pattern
+        try:
+            # Extract the numeric part
+            import re
+            num_match = re.search(r'(\d+(?:\.\d+)?)', str(unit_num))
+            if num_match:
+                num = float(num_match.group(1))
+                # Format with the target pattern
+                if "{}" in target_unit_format:
+                    # Simple placeholder
+                    unit_str = target_unit_format.format(int(num) if num.is_integer() else num)
+                else:
+                    # Format with leading zeros (e.g., {:02d})
+                    unit_str = target_unit_format.format(int(num) if num.is_integer() else num)
+            else:
+                unit_str = str(unit_num)
+        except:
+            unit_str = str(unit_num)
+        
+        # Generate new filename
+        ext = source_file.suffix
+        target_filename = f"{target_base_name} {unit_str}{ext}"
+        
+        return target_filename
+    
     def _move_series_files(self, source: Path, target: Path, plan: ResolutionPlan, result: ActionResult) -> int:
-        """Move files from source to target with conflict resolution."""
+        """Move files from source to target with conflict resolution and smart renaming."""
         moved = 0
+        
+        # Detect target series naming pattern
+        target_base_name, target_unit_format, target_subgroup = self._detect_series_naming_pattern(target)
+        
+        # If target has a subgroup pattern, use it
+        if target_subgroup:
+            target = target_subgroup
+            console.print(f"[dim]Using subgroup: {target_subgroup.name}[/dim]")
         
         for item in source.iterdir():
             if item.is_file() and item.suffix.lower() in ['.cbz', '.cbr', '.zip', '.rar']:
-                target_file = target / item.name
+                # Generate smart target filename based on target series pattern
+                target_filename = self._generate_target_filename(item, target_base_name, target_unit_format)
+                target_file = target / target_filename
+                
+                console.print(f"[dim]  {item.name} -> {target_filename}[/dim]")
                 
                 # Check for conflicts
                 if target_file.exists():
@@ -242,7 +386,7 @@ class ActionExecutor:
                             target_file.unlink()
                     elif conflict_action == "both":
                         # Rename with suffix
-                        stem = item.stem
+                        stem = target_file.stem
                         suffix = 1
                         while target_file.exists():
                             target_file = target / f"{stem}_dup{suffix}{item.suffix}"

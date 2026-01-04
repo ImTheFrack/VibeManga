@@ -130,10 +130,9 @@ def get_ai_categorization(
         if user_feedback:
             base_cons_prompt += (
                 f"\nUSER FEEDBACK / INSTRUCTION:\n"
-                f"The user has explicitly requested: '{user_feedback}'.\n"
+                f"The user has explicitly requested or added the following details: '{user_feedback}'.\n"
                 f"IMPORTANT: This feedback overrides previous constraints. "
-                f"If the user disputes a Moderation flag, you HAVE AUTHORITY to override the Moderator "
-                f"and place the series in a standard category if the user's reasoning is valid.\n"
+                f"You are to use your own judgment but the User's feedback overrides the moderator, pragmatic, and creative views. \n"
             )
         
         # Helper to format the prompt request

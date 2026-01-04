@@ -134,9 +134,11 @@ def copy_worker(task_queue: queue.Queue, result_queue: queue.Queue, progress: Pr
 @click.option("--explain", is_flag=True, help="Show AI explanation for each categorization decision.")
 @click.option("--model-assign", is_flag=True, help="Configure AI models for specific roles before running.")
 @click.option("--newonly", is_flag=True, help="Skip series that already exist in --newroot destination.")
+@click.option("--instruct", help="Provide specific instructions/feedback to the Consensus AI (e.g., 'Force all Isekai to Fantasy').")
 def organize(
     model_assign: bool,
     newonly: bool,
+    instruct: Optional[str],
     query: Optional[str],
     tag: List[str],
     no_tag: List[str],
@@ -365,7 +367,8 @@ def organize(
                     custom_categories=custom_schema if mode == "COPY" else None,
                     restrict_to_main=restrict_to,
                     quiet=use_quiet,
-                    status_callback=update_ai_status
+                    status_callback=update_ai_status,
+                    user_feedback=instruct
                 )
                 
                 # Reset AI Task visibility
