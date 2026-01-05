@@ -28,6 +28,16 @@ class AIConfig(BaseSettings):
     api_key: Optional[str] = Field(default=None, description="API key for AI service")
     timeout: int = Field(default=300, description="API timeout in seconds")
     max_retries: int = Field(default=3, description="Maximum number of retries")
+    narrative_path: Optional[Path] = Field(default=None, description="Path to a text file containing custom narrative categorization rules")
+
+    def get_narrative_content(self) -> str:
+        """Reads and returns the content of the narrative_path file if it exists."""
+        if self.narrative_path and self.narrative_path.exists():
+            try:
+                return self.narrative_path.read_text(encoding="utf-8")
+            except Exception:
+                return ""
+        return ""
 
 
 class QBitConfig(BaseSettings):

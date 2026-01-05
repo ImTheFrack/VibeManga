@@ -4,6 +4,7 @@ import time
 import requests
 import difflib
 import csv
+import threading
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Union, Tuple
@@ -21,6 +22,23 @@ logger = get_logger(__name__)
 # Jikan API constants
 JIKAN_BASE_URL = "https://api.jikan.moe/v4"
 JIKAN_RATE_LIMIT_DELAY = 1.2  # Increased to 1.2s to be safer
+
+class RateLimiter:
+    """Thread-safe rate limiter."""
+    def __init__(self, interval: float):
+        self.interval = interval
+        self.last_call = 0.0
+        self.lock = threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            now = time.time()
+            elapsed = now - self.last_call
+            if elapsed < self.interval:
+                time.sleep(self.interval - elapsed)
+            self.last_call = time.time()
+
+jikan_limiter = RateLimiter(JIKAN_RATE_LIMIT_DELAY)
 
 def _parse_csv_list(text: str) -> List[str]:
     """Parses a string representation of a list from the CSV (e.g., "['Action', 'Comedy']")."""
@@ -156,22 +174,39 @@ def fetch_by_id_from_jikan(mal_id: int, status_callback: Optional[callable] = No
     # 2. Fallback to API
     url = f"{JIKAN_BASE_URL}/manga/{mal_id}"
     log_api_call(url, "GET", params={"id": mal_id})
-    try:
-        if status_callback:
-            status_callback(f"Fetching ID {mal_id} from Jikan...")
-        time.sleep(JIKAN_RATE_LIMIT_DELAY)
-        
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        
-        data = resp.json().get("data")
-        if not data:
-            return None
+
+    for attempt in range(AI_MAX_RETRIES + 1):
+        try:
+            if status_callback:
+                status_callback(f"Fetching ID {mal_id} from Jikan...")
             
-        return _parse_jikan_result(data, query=f"ID:{mal_id}")
-    except Exception as e:
-        logger.error(f"Failed to fetch MAL ID {mal_id}: {e}")
-        return None
+            jikan_limiter.wait()
+            
+            resp = requests.get(url, timeout=10)
+            
+            if resp.status_code == 429:
+                msg = f"Jikan Rate Limit (429). Retrying (Attempt {attempt+1}/{AI_MAX_RETRIES+1})..."
+                logger.debug(msg)
+                if status_callback:
+                    status_callback(f"[yellow]{msg}[/yellow]")
+                time.sleep(2 * (attempt + 1))
+                continue
+                
+            resp.raise_for_status()
+            
+            data = resp.json().get("data")
+            if not data:
+                return None
+                
+            return _parse_jikan_result(data, query=f"ID:{mal_id}")
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch MAL ID {mal_id} (Attempt {attempt+1}): {e}")
+            if attempt < AI_MAX_RETRIES:
+                time.sleep(1)
+                continue
+            return None
+    return None
 
 def _parse_jikan_result(result: Dict[str, Any], query: str = "") -> SeriesMetadata:
     """Parses a Jikan API result dict into SeriesMetadata."""
@@ -241,7 +276,8 @@ def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> 
         try:
             if status_callback:
                 status_callback("Pulling from Jikan API...")
-            time.sleep(JIKAN_RATE_LIMIT_DELAY) # Rate limiting
+            
+            jikan_limiter.wait() # Rate limiting with thread safety
             
             # Search for the manga
             search_url = f"{JIKAN_BASE_URL}/manga"

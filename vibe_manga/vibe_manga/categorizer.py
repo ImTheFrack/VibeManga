@@ -7,7 +7,7 @@ from .models import Library, Category, Series
 from .metadata import SeriesMetadata, get_or_create_metadata
 from .ai_api import call_ai
 from .constants import ROLE_CONFIG
-from .config import get_ai_role_config  # Import from config.py
+from .config import get_ai_role_config, get_ai_config  # Import from config.py
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ def get_ai_categorization(
     metadata: SeriesMetadata,
     available_categories: List[str],
     user_feedback: Optional[str] = None,
+    current_category: Optional[str] = None,
     quiet: bool = False,
     status_callback: Optional[Callable[[str], None]] = None,
     confirm_callback: Optional[Callable[[str, str], bool]] = None
@@ -114,6 +115,19 @@ def get_ai_categorization(
         f"Pragmatic View: {results['practical']}\n"
         f"Creative View: {results['creative']}\n"
     )
+
+    # Inject Current Category if known
+    if current_category:
+        base_cons_prompt += f"Current Location: {current_category}\n"
+
+    # Inject User Narrative Rules
+    narrative_rules = get_ai_config().get_narrative_content()
+    if narrative_rules:
+        base_cons_prompt += (
+            f"\n### USER NARRATIVE & CATEGORIZATION RULES (PRIMARY AUTHORITY):\n"
+            f"The user has provided the following narrative design rules which MUST take precedence over standard logic and agent views:\n"
+            f"{narrative_rules}\n"
+        )
 
     if user_feedback:
         base_cons_prompt += (
@@ -256,12 +270,27 @@ def suggest_category(
     else:
         available = get_category_list(library, restrict_to_main=restrict_to_main)
         
+    # Determine Current Category from path (e.g. .../Manga/Action/Naruto -> Manga/Action)
+    current_cat = "Uncategorized"
+    try:
+        # Assuming path structure: Root/Main/Sub/Series
+        # Relative to library root is easiest if possible, but series.path is absolute.
+        # We can try to grab the parent and grandparent names.
+        parent = series.path.parent.name
+        grandparent = series.path.parent.parent.name
+        # Simple heuristic check if grandparent is a category-like folder or root
+        # Ideally we'd map this back to library structure, but this is a decent guess for the AI prompt
+        current_cat = f"{grandparent}/{parent}"
+    except Exception:
+        pass
+
     logger.info(f"Requesting AI categorization for '{series.name}'...")
     results = get_ai_categorization(
         series.name, 
         metadata, 
         available, 
         user_feedback=user_feedback, 
+        current_category=current_cat,
         quiet=quiet,
         status_callback=status_callback,
         confirm_callback=confirm_callback
