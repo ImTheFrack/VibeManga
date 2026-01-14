@@ -74,6 +74,23 @@ class JikanConfig(BaseSettings):
     max_retries: int = Field(default=3, description="Maximum number of retries")
     local_repository_path: Optional[Path] = Field(default=None, description="Path to local Jikan CSV repository")
 
+
+class AniListConfig(BaseSettings):
+    """Configuration for AniList API"""
+    
+    model_config = ConfigDict(
+        env_prefix="ANILIST_",
+        env_file=".env",
+        case_sensitive=False,
+        extra="ignore"
+    )
+    
+    base_url: str = Field(default="https://graphql.anilist.co", description="AniList GraphQL API URL")
+    rate_limit_delay: float = Field(default=2.0, description="Rate limit delay in seconds (Max 30/min = 2s)")
+    timeout: int = Field(default=10, description="API timeout in seconds")
+    max_retries: int = Field(default=3, description="Maximum number of retries")
+
+
 class CacheConfig(BaseSettings):
     """Configuration for caching behavior"""
     
@@ -176,6 +193,7 @@ class VibeMangaConfig(BaseSettings):
     ai: AIConfig = Field(default_factory=AIConfig, description="AI provider configuration")
     qbit: QBitConfig = Field(default_factory=QBitConfig, description="qBittorrent configuration")
     jikan: JikanConfig = Field(default_factory=JikanConfig, description="Jikan API configuration")
+    anilist: AniListConfig = Field(default_factory=AniListConfig, description="AniList API configuration")
     cache: CacheConfig = Field(default_factory=CacheConfig, description="Cache configuration")
     logging: LoggingConfig = Field(default_factory=LoggingConfig, description="Logging configuration")
     processing: ProcessingConfig = Field(default_factory=ProcessingConfig, description="Processing configuration")

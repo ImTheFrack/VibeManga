@@ -24,6 +24,13 @@ class SeriesMetadata:
     release_year: Optional[int] = None
     mal_id: Optional[int] = None
     anilist_id: Optional[int] = None
+    
+    # Enrichment Fields (AniList/Enhanced)
+    cover_image: Optional[str] = None
+    banner_image: Optional[str] = None
+    average_score: Optional[float] = None
+    popularity: Optional[int] = None
+    is_adult: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

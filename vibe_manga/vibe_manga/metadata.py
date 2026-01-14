@@ -39,6 +39,31 @@ class RateLimiter:
             self.last_call = time.time()
 
 jikan_limiter = RateLimiter(JIKAN_RATE_LIMIT_DELAY)
+anilist_limiter = RateLimiter(get_config().anilist.rate_limit_delay)
+
+def sanitize_search_query(query: str) -> str:
+    """
+    Normalizes a search query for API compatibility.
+    Converts full-width characters to half-width equivalents.
+    """
+    if not query: return ""
+    
+    replacements = {
+        "：": ":",
+        "　": " ",
+        "！": "!",
+        "？": "?",
+        "（": "(",
+        "）": ")",
+        "［": "[",
+        "］": "]"
+    }
+    
+    sanitized = query
+    for char, rep in replacements.items():
+        sanitized = sanitized.replace(char, rep)
+        
+    return sanitized.strip()
 
 def _parse_csv_list(text: str) -> List[str]:
     """Parses a string representation of a list from the CSV (e.g., "['Action', 'Comedy']")."""
@@ -282,7 +307,7 @@ def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> 
             # Search for the manga
             search_url = f"{JIKAN_BASE_URL}/manga"
             params = {
-                "q": query,
+                "q": sanitize_search_query(query),
                 "limit": 15,  # Fetch more to find a better match
                 "sfw": "false" # Include mature content since we are a manga library
             }
@@ -385,6 +410,326 @@ def fetch_from_jikan(query: str, status_callback: Optional[callable] = None) -> 
 
     return None
 
+
+def fetch_from_anilist_by_mal_id(mal_id: int, current_meta: SeriesMetadata, status_callback: Optional[callable] = None) -> SeriesMetadata:
+    """
+    Enriches existing metadata with data from AniList using the MAL ID.
+    Fetches: Tags, Banner/Cover Images, Scores, Popularity, Adult Status.
+    """
+    if not mal_id:
+        return current_meta
+        
+    query = """
+    query ($idMal: Int) {
+      Media (idMal: $idMal, type: MANGA) {
+        id
+        coverImage {
+          large
+          extraLarge
+        }
+        bannerImage
+        averageScore
+        popularity
+        isAdult
+        tags {
+          name
+          rank
+          isMediaSpoiler
+        }
+      }
+    }
+    """
+    
+    url = get_config().anilist.base_url
+    
+    for attempt in range(AI_MAX_RETRIES + 1):
+        try:
+            if status_callback:
+                status_callback(f"Enriching from AniList (MAL ID: {mal_id})...")
+            
+            anilist_limiter.wait()
+            
+            resp = requests.post(url, json={'query': query, 'variables': {'idMal': mal_id}}, timeout=10)
+            
+            if resp.status_code == 429:
+                msg = f"AniList Rate Limit (429). Retrying..."
+                if status_callback: status_callback(f"[yellow]{msg}[/yellow]")
+                time.sleep(get_config().anilist.rate_limit_delay * (attempt + 2))
+                continue
+                
+            if resp.status_code == 404:
+                # Not found on AniList, just return what we have
+                return current_meta
+
+            resp.raise_for_status()
+            data = resp.json()
+            media = data.get("data", {}).get("Media")
+            
+            if not media:
+                return current_meta
+
+            # Merge Data
+            # 1. Tags (Append new ones, filter spoilers/low rank if desired, but for now just names)
+            new_tags = [t["name"] for t in media.get("tags", []) if not t.get("isMediaSpoiler")]
+            # Union with existing tags
+            combined_tags = list(set(current_meta.tags + new_tags))
+            
+            # 2. Images
+            cover = media.get("coverImage", {}).get("extraLarge") or media.get("coverImage", {}).get("large")
+            
+            # 3. Update Metadata
+            current_meta.anilist_id = media.get("id")
+            current_meta.tags = combined_tags
+            current_meta.cover_image = cover
+            current_meta.banner_image = media.get("bannerImage")
+            current_meta.average_score = media.get("averageScore")
+            current_meta.popularity = media.get("popularity")
+            current_meta.is_adult = media.get("isAdult", False)
+            
+            logger.info(f"Enriched '{current_meta.title}' via AniList (ID: {media.get('id')})")
+            if status_callback:
+                status_callback("Enriched via AniList.")
+            
+            return current_meta
+            
+        except Exception as e:
+            logger.warning(f"AniList enrichment failed for MAL ID {mal_id}: {e}")
+            if attempt < AI_MAX_RETRIES:
+                time.sleep(1)
+                continue
+            return current_meta # Fail gracefully, return original
+            
+    return current_meta
+
+
+def fetch_from_anilist_search(query: str, status_callback: Optional[callable] = None) -> Optional[SeriesMetadata]:
+    """
+    Searches AniList for a manga series by name.
+    Returns the best match metadata or None.
+    """
+    gql = """
+    query ($search: String) {
+      Page(page: 1, perPage: 5) {
+        media(search: $search, type: MANGA, sort: SEARCH_MATCH) {
+          id
+          idMal
+          title {
+            romaji
+            english
+            native
+          }
+          status
+          description
+          genres
+          tags { name rank isMediaSpoiler }
+          coverImage { large extraLarge }
+          bannerImage
+          averageScore
+          popularity
+          isAdult
+          volumes
+          chapters
+          startDate { year }
+        }
+      }
+    }
+    """
+    
+    url = get_config().anilist.base_url
+    
+    for attempt in range(AI_MAX_RETRIES + 1):
+        try:
+            if status_callback:
+                status_callback(f"Searching AniList for '{query}'...")
+            
+            anilist_limiter.wait()
+            
+            clean_query = sanitize_search_query(query)
+            resp = requests.post(url, json={'query': gql, 'variables': {'search': clean_query}}, timeout=10)
+            
+            if resp.status_code == 429:
+                time.sleep(get_config().anilist.rate_limit_delay * (attempt + 2))
+                continue
+                
+            resp.raise_for_status()
+            data = resp.json()
+            results = data.get("data", {}).get("Page", {}).get("media", [])
+            
+            if not results:
+                return None
+
+            # Score results
+            norm_query = semantic_normalize(query)
+            best_score = 0.0
+            best_media = None
+            
+            for media in results:
+                # Check all titles
+                titles = [
+                    media["title"].get("romaji"),
+                    media["title"].get("english"),
+                    media["title"].get("native")
+                ]
+                titles = [t for t in titles if t]
+                
+                local_max = 0.0
+                for t in titles:
+                    score_norm = calculate_similarity(norm_query, semantic_normalize(t))
+                    score_raw = calculate_similarity(query.lower(), t.lower())
+                    local_max = max(local_max, score_norm, score_raw)
+                
+                if local_max > best_score:
+                    best_score = local_max
+                    best_media = media
+            
+            if best_media and best_score > 0.4: # Reasonable threshold
+                logger.info(f"AniList Search Match: '{best_media['title']['romaji']}' ({best_score:.2f})")
+                return _parse_anilist_media(best_media)
+                
+            return None
+            
+        except Exception as e:
+            logger.warning(f"AniList search failed for '{query}': {e}")
+            if attempt < AI_MAX_RETRIES:
+                time.sleep(1)
+                continue
+            return None
+    return None
+
+
+def scan_relations_for_better_match(mal_id: int, original_query: str, status_callback: Optional[callable] = None) -> Optional[SeriesMetadata]:
+    """
+    Checks the relations of a given MAL ID to see if a spin-off/sequel 
+    matches the original query better than the current ID.
+    """
+    if not mal_id:
+        return None
+        
+    gql = """
+    query ($idMal: Int) {
+      Media (idMal: $idMal, type: MANGA) {
+        title { romaji english }
+        relations {
+          edges {
+            relationType
+            node {
+              id
+              idMal
+              type
+              format
+              title { romaji english native }
+              status
+              tags { name }
+              coverImage { large extraLarge }
+              bannerImage
+              averageScore
+              popularity
+              isAdult
+            }
+          }
+        }
+      }
+    }
+    """
+    
+    url = get_config().anilist.base_url
+    
+    try:
+        anilist_limiter.wait()
+        resp = requests.post(url, json={'query': gql, 'variables': {'idMal': mal_id}}, timeout=10)
+        
+        if resp.status_code != 200:
+            return None
+            
+        data = resp.json()
+        media = data.get("data", {}).get("Media")
+        if not media or not media.get("relations"):
+            return None
+            
+        # Calculate score of the CURRENT match (Parent)
+        parent_titles = [media["title"]["romaji"], media["title"]["english"]]
+        parent_titles = [t for t in parent_titles if t]
+        
+        norm_query = semantic_normalize(original_query)
+        parent_score = 0.0
+        for t in parent_titles:
+            parent_score = max(parent_score, calculate_similarity(norm_query, semantic_normalize(t)))
+            
+        logger.debug(f"Relation Scan: Parent '{parent_titles[0]}' score: {parent_score:.2f}")
+
+        best_relation = None
+        best_rel_score = parent_score
+        
+        # Scan children
+        for edge in media["relations"]["edges"]:
+            node = edge["node"]
+            if node["type"] != "MANGA" or not node["idMal"]:
+                continue
+                
+            titles = [node["title"]["romaji"], node["title"]["english"], node["title"]["native"]]
+            titles = [t for t in titles if t]
+            
+            node_max = 0.0
+            for t in titles:
+                 node_max = max(node_max, calculate_similarity(norm_query, semantic_normalize(t)))
+            
+            # If this relation is a significantly better match
+            if node_max > best_rel_score + 0.05: # 5% improvement threshold to switch
+                best_rel_score = node_max
+                best_relation = node
+                logger.info(f"Found better relation match: '{titles[0]}' ({node_max:.2f}) > Parent ({parent_score:.2f})")
+
+        if best_relation:
+            if status_callback:
+                status_callback(f"Switched to better relation: {best_relation['title']['romaji']}")
+            return _parse_anilist_media(best_relation)
+
+    except Exception as e:
+        logger.warning(f"Relation scan failed: {e}")
+        
+    return None
+
+def _parse_anilist_media(media: Dict[str, Any]) -> SeriesMetadata:
+    """Helper to convert AniList JSON to SeriesMetadata"""
+    title_romaji = media["title"].get("romaji", "Unknown")
+    title_english = media["title"].get("english")
+    title_native = media["title"].get("native")
+    
+    # Prefer English if available and not absurdly long, else Romaji
+    main_title = title_english if title_english else title_romaji
+    
+    tags = [t["name"] for t in media.get("tags", []) if not t.get("isMediaSpoiler")]
+    
+    # Status map
+    status_map = {
+        "FINISHED": "Completed",
+        "RELEASING": "Ongoing",
+        "HIATUS": "Hiatus",
+        "CANCELLED": "Cancelled",
+        "NOT_YET_RELEASED": "Upcoming"
+    }
+    
+    return SeriesMetadata(
+        title=main_title,
+        title_english=title_english,
+        title_japanese=title_native,
+        synonyms=media.get("synonyms", []), # AniList search result might lack this in simple query
+        authors=[], # Authors are nested in staff connections, complex to fetch in simple query
+        synopsis=media.get("description", "").replace("<br>", "\n"),
+        genres=media.get("genres", []),
+        tags=tags,
+        status=status_map.get(media.get("status"), "Unknown"),
+        total_volumes=media.get("volumes"),
+        total_chapters=media.get("chapters"),
+        release_year=media.get("startDate", {}).get("year"),
+        mal_id=media.get("idMal"),
+        anilist_id=media.get("id"),
+        cover_image=media.get("coverImage", {}).get("extraLarge") or media.get("coverImage", {}).get("large"),
+        banner_image=media.get("bannerImage"),
+        average_score=media.get("averageScore"),
+        popularity=media.get("popularity"),
+        is_adult=media.get("isAdult", False)
+    )
 
 def fetch_from_ai(query: str, existing_meta: Optional[SeriesMetadata] = None, status_callback: Optional[callable] = None) -> Optional[SeriesMetadata]:
     """
@@ -518,26 +863,76 @@ def get_or_create_metadata(
     meta = fetch_from_jikan(series_name, status_callback=status_callback)
     source = "Jikan"
     
+    # AniList Fallback & Refinement
     if meta:
-        logger.info(f"Jikan found a match for '{series_name}': {meta.title}")
-        
-        # Rule 1: If --trust is enabled and Jikan result is a perfect semantic match, skip AI
-        if trust_jikan:
-            norm_query = semantic_normalize(series_name)
-            norm_jikan = semantic_normalize(meta.title)
-            if norm_query == norm_jikan:
-                logger.info(f"Trusting Jikan match for '{series_name}' (Perfect Match)")
-                if status_callback:
-                    status_callback("Perfect match found (Trusted).")
-                save_local_metadata(series_path, meta)
-                return meta, "Jikan (Trusted)"
+        # Check if a spin-off is a better match
+        better_match = scan_relations_for_better_match(meta.mal_id, series_name, status_callback)
+        if better_match:
+            meta = better_match
+            source = "Jikan -> AniList Relation"
+    else:
+        # Jikan failed, try AniList Search
+        meta = fetch_from_anilist_search(series_name, status_callback)
+        if meta:
+            source = "AniList Search"
+            # Check relations for AniList result too
+            better_match = scan_relations_for_better_match(meta.mal_id, series_name, status_callback)
+            if better_match:
+                meta = better_match
+                source = "AniList Search -> Relation"
 
-        # Verify and Enrich with AI
+    if meta:
+        logger.info(f"Found match: '{meta.title}' via {source}")
+        
+        # --- AUTO-TRUST PROTOCOL ---
+        # If the query and the result are a semantic match, we skip the expensive AI Supervisor.
+        # Now that we have AniList for tags/images, AI enrichment is less critical for known series.
+        
+        norm_query = semantic_normalize(series_name)
+        norm_result = semantic_normalize(meta.title)
+        
+        logger.debug(f"Auto-Trust Check: Query='{series_name}' ({norm_query}) vs Result='{meta.title}' ({norm_result})")
+        
+        # Check synonyms AND alternate titles for auto-trust
+        is_synonym_match = False
+        if norm_query != norm_result:
+            candidates = set(meta.synonyms)
+            if meta.title_english: candidates.add(meta.title_english)
+            if meta.title_japanese: candidates.add(meta.title_japanese)
+            
+            for cand in candidates:
+                norm_cand = semantic_normalize(cand)
+                if norm_cand == norm_query:
+                    logger.debug(f"Auto-Trust Alternate Match: '{cand}' ({norm_cand})")
+                    is_synonym_match = True
+                    break
+        
+        # TRUST IF: Explicitly trusted via flag OR Perfect Name Match OR Synonym Match
+        if trust_jikan or norm_query == norm_result or is_synonym_match:
+            trust_reason = "Flag" if trust_jikan else "Name Match" if norm_query == norm_result else "Synonym Match"
+            logger.info(f"Auto-Trusting match for '{series_name}' ({trust_reason}) - Skipping AI.")
+            
+            if status_callback:
+                status_callback(f"Match confirmed ({trust_reason}).")
+            
+            # Enrich with AniList before saving (Critical since we skipped AI)
+            if meta.mal_id:
+                meta = fetch_from_anilist_by_mal_id(meta.mal_id, meta, status_callback)
+
+            save_local_metadata(series_path, meta)
+            return meta, f"{source} (Auto-Trusted)"
+
+        # Verify and Enrich with AI (Only for ambiguous matches)
         # If verify fails, it returns None, triggering the fallback below
         enriched = enrich_with_ai(series_name, meta, existing_meta=local, status_callback=status_callback)
         if enriched:
             meta = enriched
             source = "AI Supervisor"
+            
+            # Enrich with AniList after AI verification (if MAL ID persisted)
+            if meta.mal_id:
+                meta = fetch_from_anilist_by_mal_id(meta.mal_id, meta, status_callback)
+                source += " + AniList"
         else:
             meta = None # Supervisor rejected Jikan match
 
