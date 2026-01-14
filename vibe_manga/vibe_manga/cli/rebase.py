@@ -35,6 +35,14 @@ try:
 except ImportError:
     SEVENZIP_SUPPORT = False
 
+# Optional imports for Resize support
+try:
+    import numpy as np
+    from sewar.full_ref import msssim
+    RESIZE_SUPPORT = True
+except ImportError:
+    RESIZE_SUPPORT = False
+
 def has_7z_cli() -> bool:
     """Checks if the 7z executable is available in PATH or common locations."""
     if shutil.which("7z"):
@@ -171,9 +179,10 @@ def safe_extract(archive_path: Path, output_dir: Path) -> bool:
 @click.argument("series_name", required=False)
 @click.option("--nojxl", is_flag=True, help="Convert JPEG XL (.jxl) files to PNG.")
 @click.option("--nocbr", is_flag=True, help="Convert .cbr/.rar files to .cbz (Store, no compression).")
+@click.option("--resize", is_flag=True, help="Smart downsize images (JPEG q=75) with MS-SSIM verification.")
 @click.option("--simulate", is_flag=True, help="Simulate changes without modifying files.")
 @click.option("-v", "--verbose", count=True, help="Increase verbosity.")
-def rebase(series_name: Optional[str], nojxl: bool, nocbr: bool, simulate: bool, verbose: int):
+def rebase(series_name: Optional[str], nojxl: bool, nocbr: bool, resize: bool, simulate: bool, verbose: int):
     """
     Refactor archive files in the library.
 
@@ -183,15 +192,23 @@ def rebase(series_name: Optional[str], nojxl: bool, nocbr: bool, simulate: bool,
     Operations:
         --nojxl: Scans archives for .jxl files and converts them to .png.
         --nocbr: Repacks .cbr/.rar files to .cbz (no compression).
+        --resize: Smart compression of images (target JPEG Q75), verified by MS-SSIM > 0.98.
     """
+    console.print("[dim]DEBUG: Entering rebase...[/dim]")
+
     # 1. Validation
-    if not (nojxl or nocbr):
-        console.print("[yellow]No operation specified. Please use --nojxl, --nocbr, or other flags.[/yellow]")
+    if not (nojxl or nocbr or resize):
+        console.print("[yellow]No operation specified. Please use --nojxl, --nocbr, --resize, or other flags.[/yellow]")
         return
 
     if nojxl and not JXL_SUPPORT:
         console.print("[red]Error: JXL support requires additional dependencies.[/red]")
         console.print("Please install: [bold]pip install numpy pillow imagecodecs[/bold]")
+        return
+        
+    if resize and not RESIZE_SUPPORT:
+        console.print("[red]Error: Resize support requires additional dependencies.[/red]")
+        console.print("Please install: [bold]pip install numpy sewar[/bold]")
         return
 
     # 2. Setup Logging
@@ -204,12 +221,14 @@ def rebase(series_name: Optional[str], nojxl: bool, nocbr: bool, simulate: bool,
     logging.getLogger("vibe_manga").setLevel(log_level)
 
     # 3. Find Targets
+    console.print("[dim]DEBUG: Starting scan...[/dim]")
     root_path = get_library_root()
     library = run_scan_with_progress(
         root_path,
         f"[bold green]Scanning library for rebase targets...",
         use_cache=True 
     )
+    console.print("[dim]DEBUG: Scan complete.[/dim]")
 
     targets: List[Series] = []
     if series_name:
@@ -239,6 +258,263 @@ def rebase(series_name: Optional[str], nojxl: bool, nocbr: bool, simulate: bool,
         process_nojxl(targets, simulate)
     if nocbr:
         process_nocbr(targets, simulate)
+    if resize:
+        process_resize(targets, simulate)
+
+def process_resize(targets: List[Series], simulate: bool):
+    """
+    Iterates through targets and processes Image Resizing/Compression.
+    """
+    console.print("[dim]DEBUG: Entering process_resize...[/dim]")
+    total_archives = sum(len(s.volumes) + sum(len(sg.volumes) for sg in s.sub_groups) for s in targets)
+    
+    console.print(f"Checking {total_archives} archives for potential resizing...")
+    
+    # We need a temp dir
+    base_temp = Path(PULL_TEMPDIR) if PULL_TEMPDIR else Path(tempfile.gettempdir())
+    work_dir = base_temp / "vibe_manga_rebase_resize"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console
+        ) as progress:
+            task_id = progress.add_task("Optimizing archives...", total=total_archives)
+            
+            for series in targets:
+                all_vols = list(series.volumes)
+                for sg in series.sub_groups:
+                    all_vols.extend(sg.volumes)
+                
+                for vol in all_vols:
+                    progress.update(task_id, description=f"Optimizing {vol.name}")
+                    
+                    if not vol.path.exists():
+                        progress.advance(task_id)
+                        continue
+
+                    # Process
+                    if process_archive_resize(vol, work_dir, simulate):
+                        logger.info(f"Resized: {vol.name}")
+                    
+                    progress.advance(task_id)
+
+    finally:
+        if work_dir.exists():
+            try:
+                shutil.rmtree(work_dir)
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temp dir {work_dir}: {e}")
+
+def process_archive_resize(volume: Volume, work_dir: Path, simulate: bool) -> bool:
+    """
+    Extracts archive, attempts to compress images (JPEG vs WebP), verifies with SSIM, and repacks if smaller.
+    Implements a "Fast Mode" heuristic: if one strategy wins 5 times in a row, skip SSIM/competition for subsequent files.
+    """
+    try:
+        if simulate:
+            console.print(f"[cyan]Would optimize:[/cyan] {volume.name}")
+            console.print(f"  [dim]SIMULATE: 1. Extract archive[/dim]")
+            console.print(f"  [dim]SIMULATE: 2. Competitive Mode: Try JPEG Q75 vs WebP Q75 with SSIM check[/dim]")
+            console.print(f"  [dim]SIMULATE: 3. Fast Mode: After 5 wins, lock in strategy and skip SSIM[/dim]")
+            console.print(f"  [dim]SIMULATE: 4. Repack to .cbz[/dim]")
+            return True
+
+        # 1. Setup Temp Paths
+        vol_temp = work_dir / f"processing_{volume.path.stem}"
+        if vol_temp.exists():
+            shutil.rmtree(vol_temp)
+        vol_temp.mkdir()
+
+        extracted_root = vol_temp / "extracted"
+        extracted_root.mkdir()
+
+        # 2. Extract
+        if not safe_extract(volume.path, extracted_root):
+            console.print(f"[red]Error extracting {volume.name}[/red]")
+            return False
+
+        # 3. Optimize Images
+        files_optimized = 0
+        original_size_total = 0
+        new_size_total = 0
+        
+        # Strategies Definition
+        strategies = [
+            {'name': 'JPEG Q75', 'fmt': 'JPEG', 'ext': '.jpg', 'params': {'quality': 75, 'optimize': True}},
+            {'name': 'WebP Q75', 'fmt': 'WEBP', 'ext': '.webp', 'params': {'quality': 75, 'method': 6}}
+        ]
+        
+        # Fast Mode State
+        fast_mode_strat = None
+        consecutive_wins = 0
+        last_winner_name = None
+        WIN_THRESHOLD = 5
+        
+        console.print(f"  [cyan]Optimizing images in {volume.name}...[/cyan]")
+
+        for root, _, files in os.walk(extracted_root):
+            # Sort files to ensure we process pages in order for the heuristic to work
+            for file in sorted(files):
+                file_path = Path(root) / file
+                ext = file_path.suffix.lower()
+                
+                if ext not in ['.jpg', '.jpeg', '.png', '.webp', '.bmp']:
+                    continue
+                
+                try:
+                    original_size = file_path.stat().st_size
+                    original_size_total += original_size
+                    
+                    # Load Image (Convert to RGB standard)
+                    with Image.open(file_path) as img:
+                        img_rgb = img.convert('RGB')
+                        
+                        # --- FAST MODE ---
+                        if fast_mode_strat:
+                            cand_path = file_path.with_suffix(f".candidate{fast_mode_strat['ext']}")
+                            img_rgb.save(cand_path, format=fast_mode_strat['fmt'], **fast_mode_strat['params'])
+                            cand_size = cand_path.stat().st_size
+                            
+                            if cand_size < original_size:
+                                reduction = (original_size - cand_size) / original_size * 100
+                                console.print(f"    [dim]{file}: Fast Mode ({fast_mode_strat['name']}) -> Saved {reduction:.1f}%[/dim]")
+                                
+                                target_path = file_path.with_suffix(fast_mode_strat['ext'])
+                                file_path.unlink()
+                                cand_path.replace(target_path)
+                                files_optimized += 1
+                                new_size_total += cand_size
+                            else:
+                                console.print(f"    [dim]{file}: Fast Mode ({fast_mode_strat['name']}) -> No gain, kept original[/dim]")
+                                cand_path.unlink()
+                                new_size_total += original_size
+                            continue
+
+                        # --- COMPETITIVE MODE ---
+                        console.print(f"    [bold]{file}[/bold] ({original_size/1024:.1f}KB)")
+                        valid_candidates = []
+
+                        for strat in strategies:
+                            cand_path = file_path.with_suffix(f".candidate{strat['ext']}")
+                            
+                            try:
+                                # Generate
+                                img_rgb.save(cand_path, format=strat['fmt'], **strat['params'])
+                                cand_size = cand_path.stat().st_size
+                                
+                                # Size Check
+                                if cand_size >= original_size:
+                                    console.print(f"      [dim]• {strat['name']}: No gain ({cand_size/1024:.1f}KB)[/dim]")
+                                    cand_path.unlink()
+                                    continue
+                                
+                                # SSIM Check
+                                with Image.open(cand_path) as cand_img:
+                                    arr_orig = np.array(img_rgb)
+                                    arr_cand = np.array(cand_img.convert('RGB'))
+                                    
+                                    try:
+                                        score = msssim(arr_orig, arr_cand)
+                                        if np.iscomplex(score): score = abs(score)
+                                        if isinstance(score, (np.ndarray, list, tuple)): score = np.mean(score)
+                                    except Exception:
+                                        score = 0.0
+                                
+                                reduction = (original_size - cand_size) / original_size * 100
+                                
+                                if score >= 0.98:
+                                    console.print(f"      [green]✓ {strat['name']}:[/green] {reduction:.1f}% smaller | SSIM: {score:.4f}")
+                                    valid_candidates.append({
+                                        'path': cand_path,
+                                        'size': cand_size,
+                                        'ext': strat['ext'],
+                                        'score': score,
+                                        'name': strat['name'],
+                                        'strat_ref': strat
+                                    })
+                                else:
+                                    console.print(f"      [yellow]✗ {strat['name']}:[/yellow] Low Quality | SSIM: {score:.4f}")
+                                    cand_path.unlink()
+                                    
+                            except Exception as e:
+                                if cand_path.exists(): cand_path.unlink()
+
+                        # Pick Winner & Update Heuristics
+                        if valid_candidates:
+                            valid_candidates.sort(key=lambda x: x['size'])
+                            winner = valid_candidates[0]
+                            
+                            # Cleanup losers
+                            for c in valid_candidates[1:]:
+                                c['path'].unlink()
+                                
+                            # Apply Winner
+                            target_path = file_path.with_suffix(winner['ext'])
+                            file_path.unlink()
+                            winner['path'].replace(target_path)
+                            
+                            files_optimized += 1
+                            new_size_total += winner['size']
+                            console.print(f"      [bold green]➜ Winner: {winner['name']}[/bold green] (Saved {(original_size - winner['size'])/1024:.1f}KB)")
+                            
+                            # Heuristic Logic
+                            if winner['name'] == last_winner_name:
+                                consecutive_wins += 1
+                            else:
+                                last_winner_name = winner['name']
+                                consecutive_wins = 1
+                            
+                            if consecutive_wins >= WIN_THRESHOLD:
+                                fast_mode_strat = winner['strat_ref']
+                                console.print(f"      [bold magenta]★ Strategy Locked: {fast_mode_strat['name']} (Switching to Fast Mode)[/bold magenta]")
+
+                        else:
+                            console.print("      [dim]➜ Kept Original (No valid improvements)[/dim]")
+                            new_size_total += original_size
+                            # Reset heuristic if nothing worked
+                            consecutive_wins = 0
+
+                except Exception as e:
+                    logger.debug(f"Failed to optimize {file}: {e}")
+                    console.print(f"    [red]Error {file}: {e}[/red]")
+                    new_size_total += original_size
+
+        if files_optimized == 0:
+            console.print(f"  [dim]No images optimized for {volume.name} (Size/SSIM constraints)[/dim]")
+            shutil.rmtree(vol_temp)
+            return False
+
+        reduction_mb = (original_size_total - new_size_total) / 1024 / 1024
+        console.print(f"  [green]Optimized {files_optimized} images. Saved {reduction_mb:.2f} MB.[/green]")
+
+        # 4. Repack
+        new_archive_path = vol_temp / f"{volume.path.stem}.cbz"
+        
+        with zipfile.ZipFile(new_archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for root, _, files in os.walk(extracted_root):
+                for file in files:
+                    full_path = Path(root) / file
+                    arcname = full_path.relative_to(extracted_root)
+                    zf.write(full_path, arcname)
+
+        # 5. Replace
+        target_path = volume.path.with_suffix('.cbz')
+        shutil.move(str(new_archive_path), str(target_path))
+        
+        if volume.path != target_path:
+            volume.path.unlink()
+            
+        return True
+
+    except Exception as e:
+        logger.error(f"Error processing {volume.name}: {e}", exc_info=True)
+        console.print(f"[red]Error processing {volume.name}: {e}[/red]")
+        return False
 
 def process_nojxl(targets: List[Series], simulate: bool):
     """
