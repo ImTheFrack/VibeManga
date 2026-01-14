@@ -24,6 +24,7 @@ from .cli.rename import rename
 from .cli.categorize import categorize
 from .cli.organize import organize
 from .cli.pullcomplete import pullcomplete
+from .cli.rebase import rebase
 from .cli.scrape import scrape
 from .cli.match import match
 from .cli.grab import grab
@@ -51,6 +52,7 @@ cli.add_command(hydrate)
 cli.add_command(rename)
 cli.add_command(categorize)
 cli.add_command(organize)
+cli.add_command(rebase)
 cli.add_command(pullcomplete)
 
 if __name__ == "__main__":
