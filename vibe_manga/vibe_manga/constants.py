@@ -57,7 +57,7 @@ STOP_WORDS = {
     'more','despite','begins','shes','hes', 'usa','ever,','soon','away','named','begins','begin',
     'kodansha','girls','girl','boys','boy', 'womens','women','women','called','men','man','mens',
     'suddenly','long','short','meets','meet','decides','next','finally','final','eventually',
-    'something','everything','everything','anything','nothing'
+    'something','everything','everything','anything','nothing','seas','entertainment','press'
 }
 
 # Analysis Thresholds

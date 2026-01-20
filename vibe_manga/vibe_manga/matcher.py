@@ -184,13 +184,68 @@ def match_single_entry(entry: Dict[str, Any], library_index: Optional[LibraryInd
                 best_series = matches[0]
                 break
 
+    # Strategy 4: Colon/Subtitle Heuristic (with Remote Verification)
+    if not best_series:
+        for name in parsed.get("parsed_name", []):
+            if ":" in name:
+                # Split by first colon to get potential main title
+                # e.g. "Fairy Tail: 100 Years Quest" -> "Fairy Tail"
+                # e.g. "Merry Witches' Life: Berlebagille..." -> "Merry Witches' Life"
+                candidate_name = name.split(":", 1)[0].strip()
+                
+                if len(candidate_name) < 3: # Skip short prefixes
+                    continue
+                    
+                # Search for this candidate name in library
+                candidates = library_index.search(candidate_name)
+                if not candidates:
+                    # Try fuzzy on the prefix too
+                    candidates = library_index.fuzzy_search(candidate_name, threshold=0.9) # High threshold for prefix
+                
+                if candidates:
+                    candidate_series = candidates[0]
+                    
+                    # CRITICAL SAFETY CHECK:
+                    # We found a series that matches the PREFIX.
+                    # But the FULL title might be a Sequel/Spinoff (e.g. Fairy Tail: 100 Years Quest).
+                    # We MUST verify if the FULL title maps to the SAME ID as the candidate.
+                    
+                    # We need the candidate's MAL ID
+                    # LibraryIndex stores Series or LightweightSeries. Both should have metadata access or attributes.
+                    candidate_id = None
+                    if hasattr(candidate_series, 'metadata') and hasattr(candidate_series.metadata, 'mal_id'):
+                         candidate_id = candidate_series.metadata.mal_id
+                    elif hasattr(candidate_series, 'mal_id'):
+                         candidate_id = candidate_series.mal_id
+                         
+                    if candidate_id:
+                        logger.debug(f"Colon Heuristic: '{name}' matches '{candidate_series.name}' via prefix. Verifying ID {candidate_id}...")
+                        
+                        # Fetch metadata for the FULL name from Jikan
+                        try:
+                            # Note: fetch_from_jikan handles caching, so this isn't always an API hit.
+                            remote_meta = fetch_from_jikan(name)
+                            
+                            if remote_meta and remote_meta.mal_id:
+                                if remote_meta.mal_id == candidate_id:
+                                    logger.info(f"Colon Heuristic CONFIRMED: '{name}' is '{candidate_series.name}' (ID {candidate_id})")
+                                    best_series = candidate_series
+                                    break
+                                else:
+                                    logger.info(f"Colon Heuristic REJECTED: '{name}' (ID {remote_meta.mal_id}) != '{candidate_series.name}' (ID {candidate_id})")
+                            else:
+                                logger.debug(f"Colon Heuristic Unverified: No Jikan data for '{name}'. match rejected for safety.")
+                        except Exception as e:
+                             logger.warning(f"Colon Heuristic Error verifying '{name}': {e}")
+
     if best_series:
         parsed["matched_name"] = best_series.name
         parsed["matched_path"] = str(best_series.path)
-        # We don't set matched_id here yet (it's set in post-processing usually to path or MAL ID)
-        # But let's set it to MAL ID if available, else relative path?
-        # The integration logic in process_match usually handles the ID format.
-        # We'll just pass the series name for now to fit existing flow.
+        # Try to set MAL ID if available
+        if hasattr(best_series, 'metadata') and hasattr(best_series.metadata, 'mal_id') and best_series.metadata.mal_id:
+             parsed["matched_id"] = best_series.metadata.mal_id
+        elif hasattr(best_series, 'mal_id') and best_series.mal_id:
+             parsed["matched_id"] = best_series.mal_id
         
     return parsed
 
